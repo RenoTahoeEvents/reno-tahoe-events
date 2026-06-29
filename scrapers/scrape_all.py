@@ -11,7 +11,7 @@ Deduplication strategy:
   - Static events always win over scraped duplicates
 """
 
-import json, re, time, sys, os, hashlib, argparse
+import json, re, time, sys, os, hashlib, argparse, html
 from datetime import date, timedelta, datetime
 from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
@@ -20,7 +20,7 @@ from urllib.parse import quote
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 
 TODAY  = date.today().isoformat()
-UNTIL  = (date.today() + timedelta(days=365)).isoformat()
+UNTIL  = (date.today() + timedelta(days=120)).isoformat()
 
 # Path to events.json relative to this script (../events.json)
 EVENTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'events.json')
@@ -83,9 +83,8 @@ def strip_html(s):
     return re.sub(r'<[^>]+>', '', s or '').strip()
 
 def clean(s):
-    import html
-    return re.sub(r'\s+', ' ', strip_html(html.unescape(s or ''))).strip()
-  
+    return re.sub(r'\s+', ' ', strip_html(html.unescape(str(s or '')))).strip()
+
 def is_local(text):
     return any(k in text.lower() for k in RENO_KEYWORDS)
 
@@ -154,16 +153,16 @@ def make_ev(eid, title, cat, date_str, region, venue, addr,
     if not title or not venue: return None
     return {
         'id':     eid,
-        'title':  clean(title)[:120],
+        'title':  html.unescape(clean(title))[:120],
         'cat':    cat,
         'date':   date_str,
         'region': region,
-        'venue':  clean(venue)[:80],
-        'addr':   clean(addr or ''),
+        'venue':  html.unescape(clean(venue))[:80],
+        'addr':   html.unescape(clean(addr or '')),
         'time':   time_str,
         'price':  price,
         'isFree': bool(is_free),
-        'desc':   clean(desc or '')[:300],
+        'desc':   html.unescape(clean(desc or ''))[:300],
         'tags':   (tags or [])[:6],
         'url':    url or '',
         'src':    src,
