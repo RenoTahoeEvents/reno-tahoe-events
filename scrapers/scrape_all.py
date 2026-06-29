@@ -20,7 +20,7 @@ from urllib.parse import quote
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 
 TODAY  = date.today().isoformat()
-UNTIL  = (date.today() + timedelta(days=120)).isoformat()
+UNTIL  = (date.today() + timedelta(days=365)).isoformat()
 
 # Path to events.json relative to this script (../events.json)
 EVENTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'events.json')
