@@ -346,7 +346,7 @@ const fmtL=s=>dt(s).toLocaleDateString('en-US',{weekday:'long',month:'long',day:
 const fmtMo=(y,m)=>new Date(y,m,1).toLocaleDateString('en-US',{month:'long',year:'numeric'});
 const gws=d=>{const w=new Date(d);w.setDate(w.getDate()-w.getDay());return iso(w);};
 const phr=t=>{if(!t)return-1;const m=t.match(/(\d+)(?::(\d+))?\s*(AM|PM)/i);if(!m)return-1;let h=parseInt(m[1]);if(m[3].toUpperCase()==='PM'&&h!==12)h+=12;if(m[3].toUpperCase()==='AM'&&h===12)h=0;return h;};
-function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 
 let SEED=[], events=[];
 let Cat='all',View='month',Reg='all',Dark=true;
