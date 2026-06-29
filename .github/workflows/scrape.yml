@@ -23,9 +23,9 @@ jobs:
         run: |
           git config user.name "Scraper Bot"
           git config user.email "bot@reno-tahoe-events.app"
+          git fetch origin
+          git checkout origin/main -- events.json
+          python3 scrapers/scrape_all.py --out events.json
           git add events.json
-          git stash
-          git pull
-          git stash pop
           git diff --cached --quiet || git commit -m "scrape $(date -u '+%Y-%m-%d %H:%M UTC')"
           git push
