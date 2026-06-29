@@ -1,0 +1,37 @@
+name: Scrape Events (Hourly)
+
+on:
+  schedule:
+    - cron: '0 * * * *'   # every hour on the hour
+  workflow_dispatch:        # also manually triggerable from GitHub Actions tab
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # needed to push events.json back to repo
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # No pip installs needed — scraper uses Python stdlib only
+
+      - name: Run all scrapers
+        env:
+          TM_API_KEY: ${{ secrets.TM_API_KEY }}   # optional — Ticketmaster free key
+        run: python3 scrapers/scrape_all.py --out events.json
+
+      - name: Commit and push if events changed
+        run: |
+          git config user.name  "Events Scraper Bot"
+          git config user.email "bot@reno-tahoe-events.app"
+          git add events.json
+          # Only commit if events.json actually changed
+          git diff --cached --quiet || git commit -m "chore: scrape events $(date -u '+%Y-%m-%d %H:%M UTC')"
+          git push
