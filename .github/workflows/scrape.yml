@@ -11,6 +11,8 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          ref: main
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -23,9 +25,6 @@ jobs:
         run: |
           git config user.name "Scraper Bot"
           git config user.email "bot@reno-tahoe-events.app"
-          git fetch origin
-          git checkout origin/main -- events.json
-          python3 scrapers/scrape_all.py --out events.json
           git add events.json
           git diff --cached --quiet || git commit -m "scrape $(date -u '+%Y-%m-%d %H:%M UTC')"
-          git push
+          git push --force-with-lease
