@@ -83,8 +83,9 @@ def strip_html(s):
     return re.sub(r'<[^>]+>', '', s or '').strip()
 
 def clean(s):
-    return re.sub(r'\s+', ' ', strip_html(s)).strip()
-
+    import html
+    return re.sub(r'\s+', ' ', strip_html(html.unescape(s or ''))).strip()
+  
 def is_local(text):
     return any(k in text.lower() for k in RENO_KEYWORDS)
 
