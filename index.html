@@ -260,6 +260,15 @@ body.light .ev-link{color:#007aff}
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;flex-shrink:0;"><circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="22"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="2" y1="12" x2="4" y2="12"/><line x1="20" y1="12" x2="22" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
       <span id="dlbl">Dark</span>
     </button>
+    <div class="mode-btn" style="gap:2px;padding:3px;cursor:default" title="Text size">
+      <button onclick="zoomOut()" title="Smaller text" aria-label="Smaller text" style="display:flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:6px;background:#48484a">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      </button>
+      <span id="zoomLbl" onclick="zoomReset()" title="Reset text size" style="font-size:11px;font-weight:600;min-width:34px;text-align:center;cursor:pointer">100%</span>
+      <button onclick="zoomIn()" title="Larger text" aria-label="Larger text" style="display:flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:6px;background:#48484a">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      </button>
+    </div>
     <div class="seg rseg">
       <button class="sb on" data-r="all" onclick="setR('all')">All</button>
       <button class="sb" data-r="reno" onclick="setR('reno')">Reno</button>
@@ -361,7 +370,7 @@ const phr=t=>{if(!t)return-1;const m=t.match(/(\d+)(?::(\d+))?\s*(AM|PM)/i);if(!
 function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 
 let SEED=[], events=[];
-let Cat='all',View='month',Reg='all',Dark=true,Ven='all';
+let Cat='all',View='month',Reg='all',Dark=true,Ven='all',Zoom=1;
 let calY=2026,calM=5,calDay=TD(),ws=gws(new Date()),SQ='';
 let tipTimer=null,tipEl=null;
 
@@ -373,6 +382,9 @@ function boot(){
   if(s){try{JSON.parse(s).forEach(ev=>{if(!events.find(x=>x.id===ev.id))events.push(ev);});}catch(x){}}
   const dm=ls('rth_dark');
   if(dm==='0'){Dark=false;applyDark();}
+  const zm=ls('rth_zoom');
+  if(zm){const zf=parseFloat(zm);if(zf>=0.8&&zf<=1.4)Zoom=zf;}
+  applyZoom();
   tipEl=document.getElementById('tip');
   // Support shared links: ?view=day&date=YYYY-MM-DD | ?view=week&date=YYYY-MM-DD | ?view=month&y=2026&m=6
   try{
@@ -397,6 +409,32 @@ function boot(){
   }catch(x){}
   buildMoSel();buildVenueSel();render();
 }
+
+function applyZoom(){
+  const app=document.querySelector('.app');
+  if(app){
+    const supportsZoom = CSS && CSS.supports && CSS.supports('zoom','1');
+    if(supportsZoom){
+      app.style.zoom=Zoom;
+      app.style.transform='';
+      app.style.width='';
+      app.style.height='';
+    }else{
+      // Firefox fallback: transform-scale, compensating size so layout still fills viewport
+      app.style.zoom='';
+      app.style.transformOrigin='top left';
+      app.style.transform=`scale(${Zoom})`;
+      app.style.width=(100/Zoom)+'%';
+      app.style.height=(100/Zoom)+'vh';
+    }
+  }
+  const lbl=document.getElementById('zoomLbl');
+  if(lbl)lbl.textContent=Math.round(Zoom*100)+'%';
+  lw('rth_zoom',String(Zoom));
+}
+function zoomIn(){Zoom=Math.min(1.4,Math.round((Zoom+0.1)*10)/10);applyZoom();render();}
+function zoomOut(){Zoom=Math.max(0.8,Math.round((Zoom-0.1)*10)/10);applyZoom();render();}
+function zoomReset(){Zoom=1;applyZoom();render();}
 
 function applyDark(){
   document.body.classList.toggle('light',!Dark);
