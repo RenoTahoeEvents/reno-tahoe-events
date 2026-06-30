@@ -83,7 +83,7 @@ input::placeholder{color:#48484a}
 .wev{font-size:9px;padding:1px 4px;border-radius:3px;cursor:pointer;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;line-height:1.5;margin-bottom:1px;color:#fff}
 
 
-.day-list{flex:1;overflow-y:auto;min-height:0;padding:10px 12px;display:flex;flex-direction:column;gap:5px}
+.day-list{flex:1;overflow-y:auto;overflow-x:hidden;min-height:0;max-height:calc(100dvh - 160px);padding:10px 12px;display:flex;flex-direction:column;gap:5px;-webkit-overflow-scrolling:touch}
 .drow{display:flex;align-items:flex-start;gap:8px;padding:8px 10px;background:#2c2c2e;border-radius:9px;cursor:pointer;transition:background .1s;flex-shrink:0}
 .drow:hover{background:#3a3a3c}
 .drow-time{font-size:10px;color:#8e8e93;min-width:52px;flex-shrink:0;padding-top:1px}
