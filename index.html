@@ -467,7 +467,7 @@ function render(){
   const main=document.getElementById('main');if(!main)return;
   if(View==='month'){main.innerHTML=rMonth();main.style.overflowY='hidden';attachMon();}
   else if(View==='week'){main.innerHTML=rWeek();main.style.overflowY='hidden';}
-  else{main.innerHTML=rDay();main.style.overflowY='hidden';}
+  else{main.innerHTML=rDay();main.style.overflowY='auto';}
   // attach chip clicks (non-month) and row clicks
   document.querySelectorAll('[data-eid]').forEach(el=>{
     el.addEventListener('click',function(ev){ev.stopPropagation();openDet(this.dataset.eid);});
