@@ -144,6 +144,20 @@ body.light .atc-item:hover{background:#f5f5f7}
 .atc-item span{flex:1}
 .atc-item small{font-size:13px;color:#636366}
 body.light .atc-item small{color:#8e8e93}
+.dir-wrap{position:relative;display:inline-block}
+.dir-btn{display:flex;align-items:center;gap:5px;background:#3a3a3c;border:1px solid #48484a;color:#aeaeb2;border-radius:8px;padding:9px 15px;font-size:15px;font-weight:600;cursor:pointer;white-space:nowrap;transition:background .12s}
+.dir-btn:hover{background:#48484a}
+body.light .dir-btn{background:#f2f2f7;border-color:#c7c7cc;color:#1c1c1e}
+body.light .dir-btn:hover{background:#e5e5ea}
+.dir-menu{position:absolute;bottom:calc(100% + 6px);left:0;background:#2c2c2e;border:1px solid #48484a;border-radius:12px;overflow:hidden;box-shadow:0 8px 32px rgba(0,0,0,.5);min-width:200px;z-index:9999;display:none}
+.dir-menu.open{display:block}
+body.light .dir-menu{background:#fff;border-color:#c7c7cc;box-shadow:0 8px 32px rgba(0,0,0,.15)}
+.dir-item{display:flex;align-items:center;gap:10px;padding:13px 16px;font-size:15px;font-weight:500;color:#f2f2f7;text-decoration:none;cursor:pointer;transition:background .1s;border-bottom:1px solid #3a3a3c}
+.dir-item:last-child{border-bottom:none}
+.dir-item:hover{background:#3a3a3c}
+body.light .dir-item{color:#1c1c1e;border-bottom-color:#f2f2f7}
+body.light .dir-item:hover{background:#f5f5f7}
+.dir-item span{flex:1}
 .mfoot{padding:12px 16px;border-top:1px solid #3a3a3c;display:flex;gap:8px;justify-content:flex-end;align-items:center}
 .btn-p{background:#0a84ff;color:#fff;border-radius:8px;padding:9px 18px;font-size:15px;font-weight:600;display:inline-block;text-decoration:none}
 .btn-p:hover{background:#0070d4}
@@ -1072,6 +1086,16 @@ function buildAtcUrls(ev){
   };
 }
 
+function buildDirectionsUrls(ev){
+  const locStr = [ev.venue, ev.addr].filter(Boolean).join(', ');
+  const loc = encodeURIComponent(locStr);
+  return {
+    google: `https://www.google.com/maps/dir/?api=1&destination=${loc}`,
+    apple:  `https://maps.apple.com/?daddr=${loc}`,
+    waze:   `https://waze.com/ul?q=${loc}&navigate=yes`,
+  };
+}
+
 function shareEvent(ev){
   const title  = ev.title;
   const venue  = [ev.venue, ev.addr].filter(Boolean).join(', ');
@@ -1095,7 +1119,7 @@ function shareEvent(ev){
 function toggleShareMenu(btn){
   const menu = btn.parentElement.querySelector('.share-menu');
   const isOpen = menu.classList.contains('open');
-  document.querySelectorAll('.atc-menu.open,.share-menu.open').forEach(m=>m.classList.remove('open'));
+  document.querySelectorAll('.atc-menu.open,.share-menu.open,.dir-menu.open').forEach(m=>m.classList.remove('open'));
   if(!isOpen) menu.classList.add('open');
 }
 
@@ -1142,14 +1166,21 @@ function buildShareMenu(ev){
 function toggleAtcMenu(btn){
   const menu = btn.parentElement.querySelector('.atc-menu');
   const isOpen = menu.classList.contains('open');
-  document.querySelectorAll('.atc-menu.open,.share-menu.open').forEach(m=>m.classList.remove('open'));
+  document.querySelectorAll('.atc-menu.open,.share-menu.open,.dir-menu.open').forEach(m=>m.classList.remove('open'));
+  if(!isOpen) menu.classList.add('open');
+}
+
+function toggleDirMenu(btn){
+  const menu = btn.parentElement.querySelector('.dir-menu');
+  const isOpen = menu.classList.contains('open');
+  document.querySelectorAll('.atc-menu.open,.share-menu.open,.dir-menu.open').forEach(m=>m.classList.remove('open'));
   if(!isOpen) menu.classList.add('open');
 }
 
 // Close ATC menu when clicking outside
 document.addEventListener('click', function(e){
-  if(!e.target.closest('.atc-wrap') && !e.target.closest('.share-wrap')) {
-    document.querySelectorAll('.atc-menu.open,.share-menu.open').forEach(m=>m.classList.remove('open'));
+  if(!e.target.closest('.atc-wrap') && !e.target.closest('.share-wrap') && !e.target.closest('.dir-wrap')) {
+    document.querySelectorAll('.atc-menu.open,.share-menu.open,.dir-menu.open').forEach(m=>m.classList.remove('open'));
   }
 });
 
@@ -1208,6 +1239,28 @@ function openDet(id){
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             <span>Download .ics</span>
             <small>Any calendar app</small>
+          </a>
+          `})()}
+        </div>
+      </div>
+      <div class="dir-wrap">
+        <button class="dir-btn" onclick="toggleDirMenu(this)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+          Directions
+        </button>
+        <div class="dir-menu">
+          ${(function(){const u=buildDirectionsUrls(ev);return`
+          <a class="dir-item" href="${u.google}" target="_blank" rel="noopener" onclick="document.querySelectorAll('.dir-menu').forEach(m=>m.classList.remove('open'))">
+            <img src="https://www.google.com/favicon.ico" alt="" style="width:20px;height:20px;border-radius:4px;flex-shrink:0">
+            <span>Google Maps</span>
+          </a>
+          <a class="dir-item" href="${u.apple}" target="_blank" rel="noopener" onclick="document.querySelectorAll('.dir-menu').forEach(m=>m.classList.remove('open'))">
+            <img src="https://www.apple.com/favicon.ico" alt="" style="width:20px;height:20px;border-radius:4px;flex-shrink:0">
+            <span>Apple Maps</span>
+          </a>
+          <a class="dir-item" href="${u.waze}" target="_blank" rel="noopener" onclick="document.querySelectorAll('.dir-menu').forEach(m=>m.classList.remove('open'))">
+            <span class="si-icon" style="background:#33ccff22;width:20px;height:20px;font-size:13px;border-radius:4px;display:flex;align-items:center;justify-content:center;flex-shrink:0">🚗</span>
+            <span>Waze</span>
           </a>
           `})()}
         </div>
