@@ -432,9 +432,9 @@ function applyZoom(){
   if(lbl)lbl.textContent=Math.round(Zoom*100)+'%';
   lw('rth_zoom',String(Zoom));
 }
-function zoomIn(){Zoom=Math.min(1.4,Math.round((Zoom+0.1)*10)/10);applyZoom();render();}
-function zoomOut(){Zoom=Math.max(0.8,Math.round((Zoom-0.1)*10)/10);applyZoom();render();}
-function zoomReset(){Zoom=1;applyZoom();render();}
+function zoomIn(){Zoom=Math.min(1.4,Math.round((Zoom+0.1)*10)/10);applyZoom();render();requestAnimationFrame(()=>requestAnimationFrame(render));}
+function zoomOut(){Zoom=Math.max(0.8,Math.round((Zoom-0.1)*10)/10);applyZoom();render();requestAnimationFrame(()=>requestAnimationFrame(render));}
+function zoomReset(){Zoom=1;applyZoom();render();requestAnimationFrame(()=>requestAnimationFrame(render));}
 
 function applyDark(){
   document.body.classList.toggle('light',!Dark);
