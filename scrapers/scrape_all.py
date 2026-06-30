@@ -20,7 +20,7 @@ from urllib.parse import quote
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 
 TODAY  = date.today().isoformat()
-UNTIL  = (date.today() + timedelta(days=730)).isoformat()
+UNTIL  = (date.today() + timedelta(days=120)).isoformat()
 
 # Path to events.json relative to this script (../events.json)
 EVENTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'events.json')
@@ -167,10 +167,10 @@ def make_ev(eid, title, cat, date_str, region, venue, addr,
         'time':   time_str,
         'price':  price,
         'isFree': bool(is_free),
-        'desc':   html.unescape(clean(desc or ''))[:300],
-        'tags':   (tags or [])[:6],
+        'desc':   html.unescape(clean(desc or ''))[:150],
+        'tags':   (tags or [])[:4],
         'url':    url or '',
-        'src':    src,
+        'src':    src[:40] if src else '',
     }
 
 # ── WORDPRESS TRIBE EVENTS SCRAPER (used by many venues) ─────────────────────
@@ -1205,6 +1205,18 @@ def dedup(static_events, scraped_events):
             if title_similarity(nt, s_nt): return True
         return False
 
+    # Also build venue+date index from static to block all scraped events
+    # for venues we already have good static coverage of
+    static_venue_dates = set()
+    FULLY_COVERED_VENUES = {
+        'dead ringer analog bar', 'greater nevada field', 'sky tavern bike park',
+        'idlewild park', 'west street plaza', 'wingfield park',
+    }
+    for ev in static_events:
+        v = (ev.get('venue') or '').lower()
+        if any(fv in v for fv in FULLY_COVERED_VENUES):
+            static_venue_dates.add((v[:30], ev['date']))
+
     # Filter scraped against static
     unique_scraped = []
     seen_scraped   = []  # list of (norm_title, date) already added from scraped
@@ -1212,6 +1224,10 @@ def dedup(static_events, scraped_events):
     for ev in scraped_events:
         if ev['id'] in static_ids: continue
         if matches_static(ev): continue
+        # Skip if we have full static coverage of this venue on this date
+        v = (ev.get('venue') or '').lower()
+        if any(fv in v for fv in FULLY_COVERED_VENUES):
+            if (v[:30], ev['date']) in static_venue_dates: continue
 
         nt = norm_title(ev['title'])
         d  = ev['date']
@@ -1310,6 +1326,13 @@ def main():
     merged, added = dedup(static, scraped)
     print(f'\n✓ Static: {len(static)}  Scraped: {len(scraped)}  '
           f'New (after dedup): {added}  Total: {len(merged)}', file=sys.stderr)
+
+    # Strip past events before writing (no point serving them)
+    from datetime import date as _date
+    today_str = _date.today().isoformat()
+    before = len(merged)
+    merged = [e for e in merged if (e.get('end') or e.get('date','')) >= today_str]
+    print(f'Stripped {before - len(merged)} past events. Remaining: {len(merged)}', file=sys.stderr)
 
     # Write output
     with open(args.out, 'w') as f:
