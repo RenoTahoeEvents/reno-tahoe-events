@@ -231,7 +231,7 @@ body.light .srch-btn{background:#007aff}
 .sw .si{position:absolute;left:7px;top:50%;transform:translateY(-50%);font-size:13px;color:#636366;pointer-events:none}
 .pills{display:flex;gap:3px;flex-wrap:wrap;flex-shrink:0;overflow-y:hidden}
 .ev-cnt{font-size:11px;color:#8e8e93;flex-shrink:0}
-.main{flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:column}
+.main{flex:1;min-height:0;overflow:visible;display:flex;flex-direction:column}
 
 
 .cgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(248px,1fr));gap:7px;overflow-y:auto;height:100%;padding-right:2px}
@@ -465,9 +465,9 @@ function render(){
   const cc=document.getElementById('ev-cnt');if(cc)cc.textContent=f.length+' event'+(f.length!==1?'s':'');
   const tt=document.getElementById('ev-total');if(tt)tt.textContent=events.length+' events';
   const main=document.getElementById('main');if(!main)return;
-  if(View==='month'){main.innerHTML=rMonth();main.style.overflowY='hidden';attachMon();}
-  else if(View==='week'){main.innerHTML=rWeek();main.style.overflowY='hidden';}
-  else{main.innerHTML=rDay();main.style.overflowY='auto';}
+  if(View==='month'){main.innerHTML=rMonth();main.style.overflow='hidden';attachMon();}
+  else if(View==='week'){main.innerHTML=rWeek();main.style.overflow='hidden';}
+  else{main.innerHTML=rDay();main.style.overflow='visible';}
   // attach chip clicks (non-month) and row clicks
   document.querySelectorAll('[data-eid]').forEach(el=>{
     el.addEventListener('click',function(ev){ev.stopPropagation();openDet(this.dataset.eid);});
