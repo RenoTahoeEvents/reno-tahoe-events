@@ -374,19 +374,25 @@ function boot(){
   const dm=ls('rth_dark');
   if(dm==='0'){Dark=false;applyDark();}
   tipEl=document.getElementById('tip');
-  // Support shared day links: ?view=day&date=YYYY-MM-DD
+  // Support shared links: ?view=day&date=YYYY-MM-DD | ?view=week&date=YYYY-MM-DD | ?view=month&y=2026&m=6
   try{
     const params=new URLSearchParams(window.location.search);
     const sharedDate=params.get('date');
     const sharedView=params.get('view');
+    const sharedY=params.get('y');
+    const sharedM=params.get('m');
     if(sharedDate&&/^\d{4}-\d{2}-\d{2}$/.test(sharedDate)){
       calDay=sharedDate;
       const d=dt(sharedDate);
       calY=d.getFullYear();calM=d.getMonth();
+      if(sharedView==='week')ws=gws(d);
     }
-    if(sharedView==='day'){
-      View='day';
-      document.querySelectorAll('.vseg .sb').forEach(b=>b.classList.toggle('on',b.dataset.v==='day'));
+    if(sharedY&&sharedM!==null&&/^\d{4}$/.test(sharedY)&&/^\d{1,2}$/.test(sharedM)){
+      calY=parseInt(sharedY,10);calM=parseInt(sharedM,10);
+    }
+    if(sharedView==='day'||sharedView==='week'||sharedView==='month'){
+      View=sharedView;
+      document.querySelectorAll('.vseg .sb').forEach(b=>b.classList.toggle('on',b.dataset.v===sharedView));
     }
   }catch(x){}
   buildMoSel();buildVenueSel();render();
@@ -516,6 +522,9 @@ function rMonth(){
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;flex-shrink:0;"><polyline points="9 18 15 12 9 6"/></svg>
       </button>
       <button class="today-btn" onclick="goToday()">Today</button>
+      <button class="today-btn" onclick="shareMonth()" title="Share this month" aria-label="Share this month" style="margin-left:4px">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;margin-right:4px"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="13.5" x2="15.4" y2="17.5"/><line x1="15.4" y1="6.5" x2="8.6" y2="10.5"/></svg>Share
+      </button>
     </div>
     <div class="month-scroll" id="month-scroll"><div class="dow-row">`;
   DOWS.forEach(d=>{h+=`<div class="dow">${d}</div>`;});
@@ -735,6 +744,9 @@ function rWeek(){
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;flex-shrink:0;"><polyline points="9 18 15 12 9 6"/></svg>
       </button>
       <button class="today-btn" onclick="ws=gws(new Date());render()">This week</button>
+      <button class="today-btn" onclick="shareWeek()" title="Share this week" aria-label="Share this week" style="margin-left:4px">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;margin-right:4px"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="13.5" x2="15.4" y2="17.5"/><line x1="15.4" y1="6.5" x2="8.6" y2="10.5"/></svg>Share
+      </button>
     </div>
     <div id="week-col-wrap" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden;">
       <div class="dow-row" style="flex-shrink:0;">`;
@@ -920,6 +932,43 @@ function openList(title,devs,dateStr){
       </div>`;}).join('')}
     </div>`);
   document.querySelectorAll('#mroot [data-eid]').forEach(el=>el.addEventListener('click',function(){closeM();openDet(this.dataset.eid);}));
+}
+
+function shareMonth(){
+  const url=new URL(window.location.href);
+  url.searchParams.set('view','month');
+  url.searchParams.set('y',calY);
+  url.searchParams.set('m',calM);
+  const shareUrl=url.toString();
+  const title=`Events in ${fmtMo(calY,calM)}`;
+  if(navigator.share){
+    navigator.share({title,url:shareUrl}).catch(()=>{});
+  }else{
+    navigator.clipboard.writeText(shareUrl).then(()=>{
+      const btn=event.target.closest('button');
+      if(btn){const orig=btn.innerHTML;btn.innerHTML='Copied!';setTimeout(()=>{btn.innerHTML=orig;},1500);}
+    }).catch(()=>{
+      prompt('Copy this link:',shareUrl);
+    });
+  }
+}
+
+function shareWeek(){
+  const url=new URL(window.location.href);
+  url.searchParams.set('view','week');
+  url.searchParams.set('date',iso(ws));
+  const shareUrl=url.toString();
+  const title=`Events the week of ${fmtL(iso(ws))}`;
+  if(navigator.share){
+    navigator.share({title,url:shareUrl}).catch(()=>{});
+  }else{
+    navigator.clipboard.writeText(shareUrl).then(()=>{
+      const btn=event.target.closest('button');
+      if(btn){const orig=btn.innerHTML;btn.innerHTML='Copied!';setTimeout(()=>{btn.innerHTML=orig;},1500);}
+    }).catch(()=>{
+      prompt('Copy this link:',shareUrl);
+    });
+  }
 }
 
 function shareDayDate(dateStr){
