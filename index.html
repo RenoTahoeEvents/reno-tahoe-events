@@ -434,8 +434,8 @@ function rMonth(){
     const s=dt(ev.date),en=ev.end?dt(ev.end):s;
     for(let d=new Date(s);d<=en;d.setDate(d.getDate()+1)){
       if(d.getFullYear()===calY&&d.getMonth()===calM){
-        // Only show on today or future days
-        const dStr=iso(d);
+        // Only show on today or future days — use local date string
+        const dStr=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
         if(dStr>=TD()){
           const k=d.getDate();if(!byDay[k])byDay[k]=[];
           if(!byDay[k].find(x=>x.id===ev.id))byDay[k].push(ev);
