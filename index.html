@@ -290,6 +290,9 @@ body.light .ev-link{color:#007aff}
       <option value="free">Free first</option>
       <option value="az">A–Z</option>
     </select>
+    <select id="vensel" onchange="Ven=this.value;render()" style="max-width:160px">
+      <option value="all">All Venues</option>
+    </select>
     <span class="ev-cnt" id="ev-cnt"></span>
   </div>
   <div class="pills" id="pills"></div>
@@ -331,6 +334,7 @@ const CATS_DEF=[
   {id:'wellness',l:'Wellness / Yoga',dot:'#af52de'},
   {id:'fireworks',l:'Fireworks',dot:'#ff6b35'},
   {id:'lightshow',l:'Light Shows',dot:'#ffd60a'},
+  {id:'free',l:'Free',dot:'#30d158'},
 ];
 const CM={};CATS_DEF.forEach(c=>CM[c.id]=c);
 (function(){
@@ -370,7 +374,7 @@ function boot(){
   const dm=ls('rth_dark');
   if(dm==='0'){Dark=false;applyDark();}
   tipEl=document.getElementById('tip');
-  buildMoSel();render();
+  buildMoSel();buildVenueSel();render();
 }
 
 function applyDark(){
@@ -382,21 +386,23 @@ function applyDark(){
 }
 function toggleDark(){Dark=!Dark;lw('rth_dark',Dark?'1':'0');applyDark();}
 
-function setR(r){Reg=r;document.querySelectorAll('.rseg .sb').forEach(b=>b.classList.toggle('on',b.dataset.r===r));buildMoSel();render();}
+function setR(r){Reg=r;Ven='all';const vs=document.getElementById('vensel');if(vs)vs.value='all';document.querySelectorAll('.rseg .sb').forEach(b=>b.classList.toggle('on',b.dataset.r===r));buildMoSel();buildVenueSel();render();}
 function setV(v){View=v;document.querySelectorAll('.vseg .sb').forEach(b=>b.classList.toggle('on',b.dataset.v===v));render();}
 function setCat(id){
   // If clicking the already-active filter, toggle it off back to "all"
   if(Cat===id && id!=='all') id='all';
   Cat=id;
   document.querySelectorAll('.pill').forEach(p=>p.classList.toggle('on',p.dataset.c===id));
-  buildMoSel();render();
+  buildMoSel();buildVenueSel();render();
 }
 
 function getF(){
   const today=TD();
   let ev=events.filter(x=>x.end?x.end>=today:x.date>=today);
   if(Reg!=='all')ev=ev.filter(x=>!x.region||x.region===Reg);
-  if(Cat!=='all')ev=ev.filter(x=>x.cat===Cat);
+  if(Cat==='free')ev=ev.filter(x=>x.isFree);
+  else if(Cat!=='all')ev=ev.filter(x=>x.cat===Cat);
+  if(Ven!=='all')ev=ev.filter(x=>x.venue===Ven);
   if(SQ){const q=SQ.toLowerCase();ev=ev.filter(x=>(x.title+x.venue+(x.desc||'')+(x.tags||[]).join(' ')+(x.src||'')).toLowerCase().includes(q));}
   const mo=document.getElementById('mosel');
   if(mo&&mo.value)ev=ev.filter(x=>x.date.startsWith(mo.value));
@@ -404,6 +410,7 @@ function getF(){
   if(sort==='cat')ev.sort((a,b)=>a.cat.localeCompare(b.cat)||a.date.localeCompare(b.date));
   else if(sort==='free')ev.sort((a,b)=>(b.isFree?1:0)-(a.isFree?1:0)||a.date.localeCompare(b.date));
   else if(sort==='az')ev.sort((a,b)=>a.title.localeCompare(b.title));
+  else if(sort==='venue')ev.sort((a,b)=>(a.venue||'').localeCompare(b.venue||'')||a.date.localeCompare(b.date));
   else ev.sort((a,b)=>a.date.localeCompare(b.date));
   return ev;
 }
@@ -418,6 +425,24 @@ function buildMoSel(){
     if(!seen.has(k)){seen.add(k);const o=document.createElement('option');o.value=k;o.textContent=dt(x.date).toLocaleDateString('en-US',{month:'long',year:'numeric'});sel.appendChild(o);}
   });
   if(cur)sel.value=cur;
+}
+
+function buildVenueSel(){
+  const sel=document.getElementById('vensel');if(!sel)return;
+  const cur=Ven;
+  let ev=events.filter(x=>x.date>=TD());
+  if(Reg!=='all')ev=ev.filter(x=>!x.region||x.region===Reg);
+  if(Cat==='free')ev=ev.filter(x=>x.isFree);
+  else if(Cat!=='all')ev=ev.filter(x=>x.cat===Cat);
+  if(SQ)ev=ev.filter(x=>(x.title+x.venue+x.desc).toLowerCase().includes(SQ.toLowerCase()));
+  const venues=[...new Set(ev.map(x=>x.venue).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
+  sel.innerHTML='<option value="all">All Venues</option>';
+  venues.forEach(v=>{
+    const o=document.createElement('option');
+    o.value=v;o.textContent=v;
+    if(v===cur)o.selected=true;
+    sel.appendChild(o);
+  });
 }
 
 function render(){
