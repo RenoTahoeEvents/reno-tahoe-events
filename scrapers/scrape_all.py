@@ -156,6 +156,10 @@ def make_ev(eid, title, cat, date_str, region, venue, addr,
     if date_str < TODAY or date_str > UNTIL: return None
     if not is_local(f'{title} {venue} {addr} {desc}'): return None
     if not title or not venue: return None
+    # Defensive type coercion — never let a non-string slip through into the
+    # frontend, which would crash JS string methods (.toLowerCase, localeCompare etc)
+    region = region if isinstance(region, str) and region else 'reno'
+    cat    = cat if isinstance(cat, str) and cat else 'community'
     return {
         'id':     eid,
         'title':  html.unescape(clean(title))[:120],
@@ -164,13 +168,13 @@ def make_ev(eid, title, cat, date_str, region, venue, addr,
         'region': region,
         'venue':  html.unescape(clean(venue))[:80],
         'addr':   html.unescape(clean(addr or '')),
-        'time':   time_str,
-        'price':  price,
+        'time':   time_str if isinstance(time_str, str) else None,
+        'price':  price if isinstance(price, str) else None,
         'isFree': bool(is_free),
         'desc':   html.unescape(clean(desc or ''))[:150],
-        'tags':   (tags or [])[:4],
-        'url':    url or '',
-        'src':    src[:40] if src else '',
+        'tags':   (tags if isinstance(tags, list) else [])[:4],
+        'url':    url if isinstance(url, str) else '',
+        'src':    src[:40] if isinstance(src, str) else '',
     }
 
 # ── WORDPRESS TRIBE EVENTS SCRAPER (used by many venues) ─────────────────────
@@ -1333,6 +1337,31 @@ def main():
     before = len(merged)
     merged = [e for e in merged if (e.get('end') or e.get('date','')) >= today_str]
     print(f'Stripped {before - len(merged)} past events. Remaining: {len(merged)}', file=sys.stderr)
+
+    # Final safety sweep — guarantee every field is a JS-safe type so a single
+    # malformed record (from static data or any scraper) can never crash the
+    # frontend's string methods (.toLowerCase, localeCompare, etc.)
+    STR_FIELDS = ['id','title','cat','date','region','venue','addr','src']
+    fixed_count = 0
+    for e in merged:
+        for f_ in STR_FIELDS:
+            if not isinstance(e.get(f_), str):
+                e[f_] = str(e.get(f_) or '')
+                fixed_count += 1
+        if e.get('time') is not None and not isinstance(e['time'], str):
+            e['time'] = None; fixed_count += 1
+        if e.get('price') is not None and not isinstance(e['price'], str):
+            e['price'] = None; fixed_count += 1
+        if not isinstance(e.get('isFree'), bool):
+            e['isFree'] = bool(e.get('isFree')); fixed_count += 1
+        if not isinstance(e.get('tags'), list):
+            e['tags'] = []; fixed_count += 1
+        if not isinstance(e.get('url'), str):
+            e['url'] = str(e.get('url') or ''); fixed_count += 1
+        if e.get('end') is not None and not isinstance(e['end'], str):
+            e['end'] = None; fixed_count += 1
+    if fixed_count:
+        print(f'Safety sweep: coerced {fixed_count} malformed fields', file=sys.stderr)
 
     # Write output
     with open(args.out, 'w') as f:
