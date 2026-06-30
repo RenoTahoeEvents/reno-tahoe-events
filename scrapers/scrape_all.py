@@ -176,13 +176,13 @@ def make_ev(eid, title, cat, date_str, region, venue, addr,
 # ── WORDPRESS TRIBE EVENTS SCRAPER (used by many venues) ─────────────────────
 
 def scrape_tribe(base_url, src_name, region, default_venue='', default_addr='',
-                 title_prefix='', extra_tags=None, max_pages=5):
+                 title_prefix='', extra_tags=None, max_pages=20):
     """Generic scraper for any site using The Events Calendar (Tribe) WordPress plugin."""
     events = []
     prefix = re.sub(r'[^a-z]', '', src_name.lower())[:6]
     for page in range(1, max_pages + 1):
         url = (f'{base_url}/wp-json/tribe/events/v1/events'
-               f'?start_date={TODAY}&per_page=50&page={page}')
+               f'?start_date={TODAY}&end_date={UNTIL}&per_page=50&page={page}')
         raw = get(url)
         if not raw: break
         try: data = json.loads(raw)
@@ -374,7 +374,7 @@ def scrape_cargo():
         blocks = re.findall(r'<(?:div|article)[^>]*event[^>]*>(.*?)</(?:div|article)>',
                             raw, re.DOTALL)
         seen = set()
-        for block in blocks[:30]:
+        for block in blocks[:200]:
             t_m = re.search(r'<h[2-4][^>]*>(.*?)</h[2-4]>', block, re.DOTALL)
             d_m = re.search(r'(\w+ \d{1,2},?\s*\d{4}|\d{4}-\d{2}-\d{2})', block)
             if not t_m or not d_m: continue
@@ -421,7 +421,7 @@ def scrape_nugget():
     seen = set()
     blocks = re.findall(r'<(?:div|article|li)[^>]*(?:event|show|entertainment)[^>]*>(.*?)</(?:div|article|li)>',
                         raw, re.DOTALL)
-    for block in blocks[:40]:
+    for block in blocks[:200]:
         t_m = re.search(r'<h[2-4][^>]*>(.*?)</h[2-4]>', block, re.DOTALL)
         d_m = re.search(r'(\w+ \d{1,2},?\s*\d{4}|\d{4}-\d{2}-\d{2})', block)
         if not t_m or not d_m: continue
@@ -450,7 +450,7 @@ def scrape_atlantis():
     seen = set()
     blocks = re.findall(r'<(?:div|article)[^>]*event[^>]*>(.*?)</(?:div|article)>',
                         raw, re.DOTALL)
-    for block in blocks[:30]:
+    for block in blocks[:200]:
         t_m = re.search(r'<h[2-4][^>]*>(.*?)</h[2-4]>', block, re.DOTALL)
         d_m = re.search(r'(\w+ \d{1,2},?\s*\d{4}|\d{4}-\d{2}-\d{2})', block)
         if not t_m or not d_m: continue
@@ -478,7 +478,7 @@ def scrape_peppermill():
     seen = set()
     blocks = re.findall(r'<(?:div|article)[^>]*(?:event|show|entertainment)[^>]*>(.*?)</(?:div|article)>',
                         raw, re.DOTALL)
-    for block in blocks[:30]:
+    for block in blocks[:200]:
         t_m = re.search(r'<h[2-4][^>]*>(.*?)</h[2-4]>', block, re.DOTALL)
         d_m = re.search(r'(\w+ \d{1,2},?\s*\d{4}|\d{4}-\d{2}-\d{2})', block)
         if not t_m or not d_m: continue
@@ -498,34 +498,80 @@ def scrape_peppermill():
 
 def scrape_gsr():
     print('  Grand Sierra Resort…', file=sys.stderr)
+    # GSR uses Ticketmaster — covered by TM scraper
+    # Here we also try their structured events page
     raw = get('https://www.grandsierraresort.com/entertainment/concerts-and-shows')
     if not raw:
         print('    → 0', file=sys.stderr)
         return []
     events = []
     seen = set()
-    blocks = re.findall(r'<(?:div|article)[^>]*(?:event|show|concert)[^>]*>(.*?)</(?:div|article)>',
-                        raw, re.DOTALL)
-    for block in blocks[:40]:
-        t_m = re.search(r'<h[2-4][^>]*>(.*?)</h[2-4]>', block, re.DOTALL)
-        d_m = re.search(r'(\w+ \d{1,2},?\s*\d{4}|\d{4}-\d{2}-\d{2})', block)
-        if not t_m or not d_m: continue
-        title = clean(t_m.group(1))
-        d     = parse_date(d_m.group(1))
-        if not d or title in seen: continue
-        seen.add(title)
-        l_m = re.search(r'href="(https?://[^"]+grandsierraresort[^"]+)"', block)
-        link = l_m.group(1) if l_m else 'https://www.grandsierraresort.com/entertainment'
-        ev = make_ev(scrape_id('gsr2', title+d), title,
-                     guess_cat(title), d, 'reno',
-                     'Grand Theatre – Grand Sierra Resort',
-                     '2500 E 2nd St, Reno',
-                     None, '$35–$95', False,
-                     f'{title} live at Grand Sierra Resort.',
-                     ['Grand Sierra', 'Reno'], link, 'Grand Sierra Resort')
-        if ev: events.append(ev)
-    print(f'    → {len(events)}', file=sys.stderr)
-    return events
+    # Look for structured JSON-LD data first (most reliable)
+    json_ld = re.findall(r'<script type="application/ld\+json">(.*?)</script>', raw, re.DOTALL)
+    for block in json_ld:
+        try:
+            data = json.loads(block)
+            if isinstance(data, list): items = data
+            elif isinstance(data, dict): items = [data]
+            else: continue
+            for item in items:
+                if item.get('@type') not in ('Event', 'MusicEvent', 'TheaterEvent'): continue
+                title = item.get('name','').strip()
+                start = item.get('startDate','')
+                d = parse_date(start)
+                if not d or not title or title in seen: continue
+                seen.add(title)
+                loc = item.get('location',{})
+                venue = loc.get('name','Grand Theatre – Grand Sierra Resort')
+                addr  = loc.get('address','2500 E 2nd St, Reno')
+                if isinstance(addr, dict):
+                    addr = ', '.join(filter(None,[addr.get('streetAddress',''), addr.get('addressLocality',''), addr.get('addressRegion','')]))
+                offers = item.get('offers',{})
+                price = None
+                if isinstance(offers, dict):
+                    lo = offers.get('lowPrice')
+                    hi = offers.get('highPrice')
+                    if lo and hi: price = f'${float(lo):.0f}–${float(hi):.0f}'
+                    elif lo: price = f'${float(lo):.0f}'
+                url = item.get('url', item.get('@id', 'https://www.grandsierraresort.com/entertainment'))
+                ev = make_ev(scrape_id('gsr2', title+d), title,
+                             guess_cat(title), d, 'reno',
+                             venue, addr, to_12h(start),
+                             price, False, item.get('description','')[:300],
+                             ['Grand Sierra','Reno'], url, 'Grand Sierra Resort')
+                if ev: events.append(ev)
+        except: continue
+    # Fallback to HTML parsing if JSON-LD found nothing
+    if not events:
+        raw = get('https://www.grandsierraresort.com/entertainment/concerts-and-shows')
+        if not raw:
+            print('    → 0', file=sys.stderr)
+            return []
+        events = []
+        seen = set()
+        blocks = re.findall(r'<(?:div|article)[^>]*(?:event|show|concert)[^>]*>(.*?)</(?:div|article)>',
+                            raw, re.DOTALL)
+        for block in blocks[:200]:
+            t_m = re.search(r'<h[2-4][^>]*>(.*?)</h[2-4]>', block, re.DOTALL)
+            d_m = re.search(r'(\w+ \d{1,2},?\s*\d{4}|\d{4}-\d{2}-\d{2})', block)
+            if not t_m or not d_m: continue
+            title = clean(t_m.group(1))
+            d     = parse_date(d_m.group(1))
+            if not d or title in seen: continue
+            seen.add(title)
+            l_m = re.search(r'href="(https?://[^"]+grandsierraresort[^"]+)"', block)
+            link = l_m.group(1) if l_m else 'https://www.grandsierraresort.com/entertainment'
+            ev = make_ev(scrape_id('gsr2', title+d), title,
+                         guess_cat(title), d, 'reno',
+                         'Grand Theatre – Grand Sierra Resort',
+                         '2500 E 2nd St, Reno',
+                         None, '$35–$95', False,
+                         f'{title} live at Grand Sierra Resort.',
+                         ['Grand Sierra', 'Reno'], link, 'Grand Sierra Resort')
+            if ev: events.append(ev)
+        print(f'    → {len(events)}', file=sys.stderr)
+        return events
+
 
 def scrape_pioneer():
     print('  Pioneer Center…', file=sys.stderr)
@@ -542,7 +588,7 @@ def scrape_pioneer():
         seen = set()
         blocks = re.findall(r'<(?:div|article)[^>]*event[^>]*>(.*?)</(?:div|article)>',
                             raw, re.DOTALL)
-        for block in blocks[:20]:
+        for block in blocks[:200]:
             t_m = re.search(r'<h[2-4][^>]*>(.*?)</h[2-4]>', block, re.DOTALL)
             d_m = re.search(r'(\w+ \d{1,2},?\s*\d{4}|\d{4}-\d{2}-\d{2})', block)
             if not t_m or not d_m: continue
@@ -575,7 +621,7 @@ def scrape_crystal_bay():
     tixr_ids = re.findall(r'tixr\.com/[^"\']*?(\d{4,})', raw)
     # Parse HTML blocks
     blocks = re.split(r'(?=<(?:div|article)[^>]*(?:show|event|listing)[^>]*>)', raw)
-    for block in blocks[:40]:
+    for block in blocks[:200]:
         t_m = re.search(r'<h[2-4][^>]*>(.*?)</h[2-4]>', block, re.DOTALL)
         d_m = re.search(r'(\w+ \d{1,2},?\s*\d{4}|\d{4}-\d{2}-\d{2})', block)
         if not t_m or not d_m: continue
@@ -607,7 +653,7 @@ def scrape_bba():
     seen = set()
     blocks = re.findall(r'<(?:div|article)[^>]*event[^>]*>(.*?)</(?:div|article)>',
                         raw, re.DOTALL)
-    for block in blocks[:20]:
+    for block in blocks[:200]:
         t_m = re.search(r'<h[2-4][^>]*>(.*?)</h[2-4]>', block, re.DOTALL)
         d_m = re.search(r'(\w+ \d{1,2},?\s*\d{4}|\d{4}-\d{2}-\d{2})', block)
         if not t_m or not d_m: continue
@@ -761,31 +807,39 @@ def scrape_eventbrite():
         ('South Lake Tahoe', 'tahoe'),
     ]
     for location, region in searches:
-        url = (f'https://www.eventbrite.com/api/v3/destination/search/'
-               f'?start_date.range_start={TODAY}T00%3A00%3A00'
-               f'&start_date.range_end={UNTIL}T23%3A59%3A59'
-               f'&location.address={quote(location)}'
-               f'&location.within=25mi&expand=venue&page_size=50')
-        raw = get(url)
-        if not raw: continue
-        try: data = json.loads(raw)
-        except: continue
-        for item in data.get('events',{}).get('results',[]):
-            title = (item.get('name') or '').strip()
-            d     = parse_date((item.get('start') or {}).get('local',''))
-            if not title or not d: continue
-            vd    = item.get('venue') or {}
-            venue = (vd.get('name') or location).strip()
-            addr  = ((vd.get('address') or {}).get('localized_address_display') or '')
-            if not is_local(f'{title} {venue} {addr}'): continue
-            is_free = item.get('is_free', False)
-            desc    = clean((item.get('description') or {}).get('text',''))[:300]
-            ev = make_ev(scrape_id('eb', item.get('id', title+d)),
-                title, guess_cat(title, desc), d, region,
-                venue, addr, to_12h((item.get('start') or {}).get('local','')),
-                'Free' if is_free else None, is_free, desc, [],
-                item.get('url','https://www.eventbrite.com/'), 'Eventbrite')
-            if ev: events.append(ev)
+        eb_page = 1
+        while eb_page <= 5:  # max 5 pages per location
+            url = (f'https://www.eventbrite.com/api/v3/destination/search/'
+                   f'?start_date.range_start={TODAY}T00%3A00%3A00'
+                   f'&start_date.range_end={UNTIL}T23%3A59%3A59'
+                   f'&location.address={quote(location)}'
+                   f'&location.within=25mi&expand=venue&page_size=50&page={eb_page}')
+            raw = get(url)
+            if not raw: break
+            try: data = json.loads(raw)
+            except: break
+            results = data.get('events',{}).get('results',[])
+            if not results: break
+            for item in results:
+                title = (item.get('name') or '').strip()
+                d     = parse_date((item.get('start') or {}).get('local',''))
+                if not title or not d: continue
+                vd    = item.get('venue') or {}
+                venue = (vd.get('name') or location).strip()
+                addr  = ((vd.get('address') or {}).get('localized_address_display') or '')
+                if not is_local(f'{title} {venue} {addr}'): continue
+                is_free = item.get('is_free', False)
+                desc    = clean((item.get('description') or {}).get('text',''))[:300]
+                ev = make_ev(scrape_id('eb', item.get('id', title+d)),
+                    title, guess_cat(title, desc), d, region,
+                    venue, addr, to_12h((item.get('start') or {}).get('local','')),
+                    'Free' if is_free else None, is_free, desc, [],
+                    item.get('url','https://www.eventbrite.com/'), 'Eventbrite')
+                if ev: events.append(ev)
+                pass
+            if len(results) < 50: break
+            eb_page += 1
+            time.sleep(0.5)
         time.sleep(1)
     print(f'    → {len(events)}', file=sys.stderr)
     return events
@@ -808,32 +862,265 @@ def scrape_ticketmaster():
                f'?apikey={api_key}&latlong={latlong}&radius={radius}&unit=miles'
                f'&startDateTime={TODAY}T00:00:00Z&endDateTime={UNTIL}T23:59:59Z'
                f'&size=100&sort=date,asc&locale=en-us')
+        tm_page = 0
+        while True:
+            paged_url = url + f'&page={tm_page}'
+            raw = get(paged_url)
+            if not raw: break
+            try: data = json.loads(raw)
+            except: break
+            page_info = data.get('page', {})
+            total_pages = page_info.get('totalPages', 1)
+            for item in (data.get('_embedded',{}).get('events') or []):
+                title = (item.get('name') or '').strip()
+                d     = (item.get('dates',{}).get('start',{}).get('localDate',''))
+                if not title or not d: continue
+                venues  = (item.get('_embedded',{}).get('venues') or [{}])
+                vd      = venues[0]
+                venue   = (vd.get('name') or '').strip()
+                city    = ((vd.get('city') or {}).get('name',''))
+                state   = ((vd.get('state') or {}).get('stateCode',''))
+                addr_st = ((vd.get('address') or {}).get('line1',''))
+                addr    = ', '.join(filter(None,[addr_st, city, state]))
+                if not is_local(f'{title} {venue} {city}'): continue
+                pr      = (item.get('priceRanges') or [{}])[0]
+                lo, hi  = pr.get('min'), pr.get('max')
+                price   = (f'${lo:.0f}–${hi:.0f}' if lo and hi else
+                           f'${lo:.0f}' if lo else None)
+                ev = make_ev(scrape_id('tm', item.get('id', title+d)),
+                    title, guess_cat(title), d, region, venue, addr,
+                    (item.get('dates',{}).get('start',{}).get('localTime','') or None),
+                    price, False, '', [],
+                    item.get('url','https://www.ticketmaster.com/'), 'Ticketmaster')
+                if ev: events.append(ev)
+            if tm_page >= total_pages - 1: break
+            tm_page += 1
+            time.sleep(0.5)
+    print(f'    → {len(events)}', file=sys.stderr)
+    return events
+
+
+# ── SONGKICK — Reno/Tahoe metro area ──────────────────────────────────────
+def scrape_songkick():
+    print('  Songkick…', file=sys.stderr)
+    # Songkick metro ID for Reno: 13455
+    # Lake Tahoe area is covered under Reno metro
+    events = []
+    for metro_id, region in [('13455','reno'), ('24843','tahoe')]:
+        page = 1
+        while page <= 10:
+            url = (f'https://api.songkick.com/api/3.0/metro_areas/{metro_id}/calendar.json'
+                   f'?apikey=not-required-for-basic&min_date={TODAY}&max_date={UNTIL}'
+                   f'&per_page=50&page={page}')
+            # Songkick doesn't require API key for basic metro calendar
+            raw = get(url)
+            if not raw or raw.startswith('ERROR'): break
+            try: data = json.loads(raw)
+            except: break
+            results = data.get('resultsPage',{})
+            items = results.get('results',{}).get('event',[])
+            total = results.get('totalEntries', 0)
+            if not items: break
+            for item in items:
+                title = item.get('displayName','').strip()
+                d = parse_date(item.get('start',{}).get('date',''))
+                if not title or not d: continue
+                venue_d = item.get('venue',{})
+                venue = venue_d.get('displayName','')
+                city  = (venue_d.get('metroArea',{}).get('displayName',''))
+                if not is_local(f'{title} {venue} {city}'): continue
+                perf = item.get('performance',[])
+                artists = [p.get('displayName','') for p in perf if p.get('displayName')]
+                display = f'{venue} – {", ".join(artists)}' if artists else title
+                ev = make_ev(
+                    scrape_id('sk', str(item.get('id','')) + d),
+                    display, guess_cat(title), d, region,
+                    venue, city,
+                    item.get('start',{}).get('time'),
+                    None, False,
+                    f'{", ".join(artists)} live at {venue}.' if artists else title,
+                    artists[:4],
+                    item.get('uri','https://www.songkick.com/'),
+                    'Songkick'
+                )
+                if ev: events.append(ev)
+            if len(items) < 50 or page * 50 >= total: break
+            page += 1
+            time.sleep(0.5)
+        time.sleep(1)
+    print(f'    → {len(events)}', file=sys.stderr)
+    return events
+
+
+# ── TICKETMASTER VENUE-SPECIFIC LOOKUPS ───────────────────────────────────
+# These pull ALL future events for specific major venues by their TM venue ID
+# This is more reliable than geo search for getting 2027+ shows
+def scrape_tm_venues():
+    api_key = os.environ.get('TM_API_KEY', '')
+    if not api_key:
+        return []
+    print('  Ticketmaster (venue-specific)…', file=sys.stderr)
+
+    # Ticketmaster venue IDs for Reno/Tahoe major venues
+    TM_VENUES = [
+        ('KovZpZA6AAEA', 'Grand Sierra Resort – Grand Theatre', '2500 E 2nd St, Reno', 'reno'),
+        ('KovZpZA6knlA', 'Reno Events Center', '400 N Center St, Reno', 'reno'),
+        ('KovZpZA6AAAA', 'Nugget Casino Resort', '1100 Nugget Ave, Sparks NV', 'reno'),
+        ('KovZpZA6AAJA', 'Pioneer Center for the Performing Arts', '100 S Virginia St, Reno', 'reno'),
+        ('KovZpZAa6e1A', 'Silver Legacy Casino', '407 N Virginia St, Reno', 'reno'),
+        ('KovZpZAEAl6A', 'Cargo Concert Hall – Whitney Peak Hotel', '255 N Virginia St, Reno', 'reno'),
+        ('KovZpZA6kkAA', 'Crystal Bay Casino – Crown Room', '14 NV-28, Crystal Bay NV', 'tahoe'),
+        ('KovZpZA6AekA', "Harrah's/Harveys Lake Tahoe", 'Highway 50, Stateline NV', 'tahoe'),
+    ]
+
+    events = []
+    for venue_id, venue_name, venue_addr, region in TM_VENUES:
+        page = 0
+        while True:
+            url = (f'https://app.ticketmaster.com/discovery/v2/events.json'
+                   f'?apikey={api_key}&venueId={venue_id}'
+                   f'&startDateTime={TODAY}T00:00:00Z&endDateTime={UNTIL}T23:59:59Z'
+                   f'&size=100&sort=date,asc&locale=en-us&page={page}')
+            raw = get(url)
+            if not raw or raw.startswith('ERROR'): break
+            try: data = json.loads(raw)
+            except: break
+            page_info = data.get('page',{})
+            total_pages = page_info.get('totalPages', 1)
+            items = data.get('_embedded',{}).get('events') or []
+            for item in items:
+                title = (item.get('name') or '').strip()
+                d     = item.get('dates',{}).get('start',{}).get('localDate','')
+                if not title or not d: continue
+                pr    = (item.get('priceRanges') or [{}])[0]
+                lo,hi = pr.get('min'), pr.get('max')
+                price = (f'${lo:.0f}–${hi:.0f}' if lo and hi else
+                         f'${lo:.0f}' if lo else None)
+                ev = make_ev(
+                    scrape_id('tmv', venue_id + item.get('id','') + d),
+                    title, guess_cat(title), d, region,
+                    venue_name, venue_addr,
+                    item.get('dates',{}).get('start',{}).get('localTime'),
+                    price, False, '',
+                    [],
+                    item.get('url','https://www.ticketmaster.com/'),
+                    'Ticketmaster'
+                )
+                if ev: events.append(ev)
+            if page >= total_pages - 1: break
+            page += 1
+            time.sleep(0.3)
+        time.sleep(0.5)
+    print(f'    → {len(events)}', file=sys.stderr)
+    return events
+
+
+# ── NEVADA MUSEUM OF ART ──────────────────────────────────────────────────
+def scrape_nma():
+    print('  Nevada Museum of Art…', file=sys.stderr)
+    evts = scrape_tribe(
+        'https://nevadaart.org', 'Nevada Museum of Art',
+        'reno', 'Nevada Museum of Art', '160 W Liberty St, Reno NV',
+        extra_tags=['art', 'museum', 'exhibits', 'Reno']
+    )
+    print(f'    → {len(evts)}', file=sys.stderr)
+    return evts
+
+
+# ── RENO PHILHARMONIC ─────────────────────────────────────────────────────
+def scrape_reno_phil():
+    print('  Reno Philharmonic…', file=sys.stderr)
+    evts = scrape_tribe(
+        'https://www.renophilharmonic.com', 'Reno Philharmonic',
+        'reno', 'Pioneer Center for the Performing Arts', '100 S Virginia St, Reno',
+        extra_tags=['classical', 'orchestra', 'symphony', 'Reno Philharmonic']
+    )
+    print(f'    → {len(evts)}', file=sys.stderr)
+    return evts
+
+
+# ── WASHOE COUNTY PARKS (Bartley Ranch, Bowers Mansion etc) ──────────────
+def scrape_washoe_parks():
+    print('  Washoe County Parks…', file=sys.stderr)
+    evts = scrape_tribe(
+        'https://www.washoecounty.gov', 'Washoe County Parks',
+        'reno', 'Washoe County Parks', 'Reno, NV',
+        extra_tags=['outdoor', 'parks', 'Washoe County', 'free']
+    )
+    # Also try their dedicated events calendar
+    if not evts:
+        raw = get('https://www.washoecounty.gov/events/')
+        if raw and not raw.startswith('ERROR'):
+            evts = scrape_html_events(
+                'https://www.washoecounty.gov/events/',
+                'Washoe County Parks', 'reno',
+                'Washoe County Parks', 'Reno, NV',
+                r'<h[2-4][^>]*>(.*?)</h[2-4]>',
+                r'(\w+ \d{1,2},?\s*\d{4}|\d{4}-\d{2}-\d{2})',
+                extra_tags=['outdoor','parks','Washoe County']
+            )
+    print(f'    → {len(evts)}', file=sys.stderr)
+    return evts
+
+
+# ── TAHOE BLUE EVENT CENTER ───────────────────────────────────────────────
+def scrape_tahoe_blue():
+    print('  Tahoe Blue Event Center…', file=sys.stderr)
+    evts = scrape_tribe(
+        'https://www.tahoeblueeventcenter.com', 'Tahoe Blue Event Center',
+        'tahoe', 'Tahoe Blue Event Center', '50 US-50, Stateline, NV',
+        extra_tags=['Tahoe Blue', 'South Lake Tahoe', 'Stateline']
+    )
+    if not evts:
+        raw = get('https://www.tahoeblueeventcenter.com/events/')
+        if raw and not raw.startswith('ERROR'):
+            evts = scrape_html_events(
+                'https://www.tahoeblueeventcenter.com/events/',
+                'Tahoe Blue Event Center', 'tahoe',
+                'Tahoe Blue Event Center', '50 US-50, Stateline, NV',
+                r'<h[2-4][^>]*>(.*?)</h[2-4]>',
+                r'(\w+ \d{1,2},?\s*\d{4}|\d{4}-\d{2}-\d{2})',
+                extra_tags=['Tahoe Blue','South Lake Tahoe']
+            )
+    print(f'    → {len(evts)}', file=sys.stderr)
+    return evts
+
+
+# ── RENO ACES (MiLB proper schedule API) ─────────────────────────────────
+def scrape_reno_aces_v2():
+    print('  Reno Aces (schedule)…', file=sys.stderr)
+    events = []
+    # MiLB official schedule endpoint
+    year = __import__('datetime').date.today().year
+    for y in [year, year+1]:
+        url = f'https://bsnv2.mlb.com/api/v1/schedule?sportId=11&teamId=2476&season={y}&gameType=R&hydrate=venue,team'
         raw = get(url)
-        if not raw: continue
+        if not raw or raw.startswith('ERROR'): continue
         try: data = json.loads(raw)
         except: continue
-        for item in (data.get('_embedded',{}).get('events') or []):
-            title = (item.get('name') or '').strip()
-            d     = (item.get('dates',{}).get('start',{}).get('localDate',''))
-            if not title or not d: continue
-            venues  = (item.get('_embedded',{}).get('venues') or [{}])
-            vd      = venues[0]
-            venue   = (vd.get('name') or '').strip()
-            city    = ((vd.get('city') or {}).get('name',''))
-            state   = ((vd.get('state') or {}).get('stateCode',''))
-            addr_st = ((vd.get('address') or {}).get('line1',''))
-            addr    = ', '.join(filter(None,[addr_st, city, state]))
-            if not is_local(f'{title} {venue} {city}'): continue
-            pr      = (item.get('priceRanges') or [{}])[0]
-            lo, hi  = pr.get('min'), pr.get('max')
-            price   = (f'${lo:.0f}–${hi:.0f}' if lo and hi else
-                       f'${lo:.0f}' if lo else None)
-            ev = make_ev(scrape_id('tm', item.get('id', title+d)),
-                title, guess_cat(title), d, region, venue, addr,
-                (item.get('dates',{}).get('start',{}).get('localTime','') or None),
-                price, False, '', [],
-                item.get('url','https://www.ticketmaster.com/'), 'Ticketmaster')
-            if ev: events.append(ev)
+        for date_entry in data.get('dates',[]):
+            d = date_entry.get('date','')
+            if not d or d < TODAY or d > UNTIL: continue
+            for game in date_entry.get('games',[]):
+                teams = game.get('teams',{})
+                home = teams.get('home',{}).get('team',{}).get('name','')
+                away = teams.get('away',{}).get('team',{}).get('name','')
+                if 'Reno' not in home and 'Reno' not in away: continue
+                is_home = 'Reno' in home
+                opponent = away if is_home else home
+                title = f'Reno Aces vs {opponent}' if is_home else f'Reno Aces @ {opponent}'
+                if not is_home: continue  # only show home games
+                game_time = game.get('gameDate','')
+                ev = make_ev(
+                    scrape_id('aces3', d + opponent),
+                    title, 'sports', d, 'reno',
+                    'Greater Nevada Field', '250 Evans Ave, Reno',
+                    to_12h(game_time), '$9–$38', False,
+                    f'Reno Aces AAA baseball vs {opponent}. Home game at Greater Nevada Field.',
+                    ['baseball','AAA','Reno Aces','family','sports'],
+                    'https://www.milb.com/reno/schedule', 'Reno Aces / MiLB'
+                )
+                if ev: events.append(ev)
         time.sleep(0.5)
     print(f'    → {len(events)}', file=sys.stderr)
     return events
@@ -971,6 +1258,13 @@ ALL_SCRAPERS = {
     'bba':     scrape_bba,
     'bart':    scrape_bartley_ranch,
     'aces':    scrape_reno_aces,
+    'acesv2':  scrape_reno_aces_v2,
+    'sk':      scrape_songkick,
+    'tmv':     scrape_tm_venues,
+    'nma':     scrape_nma,
+    'phil':    scrape_reno_phil,
+    'wcp':     scrape_washoe_parks,
+    'tbe':     scrape_tahoe_blue,
     'ra':      scrape_ra,
     'eb':      scrape_eventbrite,
     'tm':      scrape_ticketmaster,
