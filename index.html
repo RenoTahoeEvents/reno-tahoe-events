@@ -626,7 +626,7 @@ function attachMon(){
       return t>=s && t<=en;
     });
     if(devs.length === 1) openDet(devs[0].id);
-    else openList(fmtL(ds), devs);
+    else openList(fmtL(ds), devs, ds);
   }
 
   // ── Kick off layout + ResizeObserver + window resize ────────────────────────
@@ -654,7 +654,7 @@ function attachMon(){
       const devs=getF().filter(ev2=>{const s=dt(ev2.date),en=ev2.end?dt(ev2.end):s,t=dt(ds);return t>=s&&t<=en;});
       if(!devs.length)return;
       if(devs.length===1){openDet(devs[0].id);return;}
-      openList(fmtL(ds),devs);
+      openList(fmtL(ds),devs,ds);
     });
   });
 
@@ -890,11 +890,15 @@ function showM(inner){
 }
 function closeM(){document.getElementById('mroot').innerHTML='';if(tipEl)tipEl.style.display='none';}
 
-function openList(title,devs){
+function openList(title,devs,dateStr){
+  const shareBtn = dateStr ? `<button class="xbtn" onclick="shareDayDate('${dateStr}')" title="Share this day" aria-label="Share this day" style="margin-right:6px"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;flex-shrink:0;"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="13.5" x2="15.4" y2="17.5"/><line x1="15.4" y1="6.5" x2="8.6" y2="10.5"/></svg></button>` : '';
   showM(`
     <div class="mhead">
       <h3>${esc(title)}</h3>
-      <button class="xbtn" onclick="closeM()" title="Close" aria-label="Close"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;flex-shrink:0;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      <div style="display:flex;align-items:center">
+        ${shareBtn}
+        <button class="xbtn" onclick="closeM()" title="Close" aria-label="Close"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;flex-shrink:0;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      </div>
     </div>
     <div class="mbody" style="display:flex;flex-direction:column;gap:6px">
       ${devs.map(ev=>{const c=CM[ev.cat]||CM.community;return`<div class="drow" data-eid="${ev.id}">
@@ -905,6 +909,24 @@ function openList(title,devs){
       </div>`;}).join('')}
     </div>`);
   document.querySelectorAll('#mroot [data-eid]').forEach(el=>el.addEventListener('click',function(){closeM();openDet(this.dataset.eid);}));
+}
+
+function shareDayDate(dateStr){
+  const url=new URL(window.location.href);
+  url.searchParams.set('view','day');
+  url.searchParams.set('date',dateStr);
+  const shareUrl=url.toString();
+  const title=`Events on ${fmtL(dateStr)}`;
+  if(navigator.share){
+    navigator.share({title,url:shareUrl}).catch(()=>{});
+  }else{
+    navigator.clipboard.writeText(shareUrl).then(()=>{
+      const btn=event.target.closest('button');
+      if(btn){const orig=btn.innerHTML;btn.innerHTML='Copied!';setTimeout(()=>{btn.innerHTML=orig;},1500);}
+    }).catch(()=>{
+      prompt('Copy this link:',shareUrl);
+    });
+  }
 }
 
 
