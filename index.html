@@ -305,6 +305,7 @@ body.light .ev-link{color:#007aff}
 <script>
 const CATS_DEF=[
   {id:'all',l:'All Events',dot:'#8e8e93'},
+  {id:'free',l:'Free',dot:'#30d158'},
   {id:'concert',l:'Concerts',dot:'#5e5ce6'},
   {id:'dj',l:'DJ / Nightlife',dot:'#0a84ff'},
   {id:'casino',l:'Casino Shows',dot:'#ff9f0a'},
@@ -334,7 +335,6 @@ const CATS_DEF=[
   {id:'wellness',l:'Wellness / Yoga',dot:'#af52de'},
   {id:'fireworks',l:'Fireworks',dot:'#ff6b35'},
   {id:'lightshow',l:'Light Shows',dot:'#ffd60a'},
-  {id:'free',l:'Free',dot:'#30d158'},
 ];
 const CM={};CATS_DEF.forEach(c=>CM[c.id]=c);
 (function(){
@@ -374,6 +374,21 @@ function boot(){
   const dm=ls('rth_dark');
   if(dm==='0'){Dark=false;applyDark();}
   tipEl=document.getElementById('tip');
+  // Support shared day links: ?view=day&date=YYYY-MM-DD
+  try{
+    const params=new URLSearchParams(window.location.search);
+    const sharedDate=params.get('date');
+    const sharedView=params.get('view');
+    if(sharedDate&&/^\d{4}-\d{2}-\d{2}$/.test(sharedDate)){
+      calDay=sharedDate;
+      const d=dt(sharedDate);
+      calY=d.getFullYear();calM=d.getMonth();
+    }
+    if(sharedView==='day'){
+      View='day';
+      document.querySelectorAll('.vseg .sb').forEach(b=>b.classList.toggle('on',b.dataset.v==='day'));
+    }
+  }catch(x){}
   buildMoSel();buildVenueSel();render();
 }
 
@@ -398,19 +413,19 @@ function setCat(id){
 
 function getF(){
   const today=TD();
-  let ev=events.filter(x=>x.end?x.end>=today:x.date>=today);
+  let ev=events.filter(x=>x&&typeof x.date==='string'&&(x.end?x.end>=today:x.date>=today));
   if(Reg!=='all')ev=ev.filter(x=>!x.region||x.region===Reg);
   if(Cat==='free')ev=ev.filter(x=>x.isFree);
   else if(Cat!=='all')ev=ev.filter(x=>x.cat===Cat);
   if(Ven!=='all')ev=ev.filter(x=>x.venue===Ven);
-  if(SQ){const q=SQ.toLowerCase();ev=ev.filter(x=>(x.title+x.venue+(x.desc||'')+(x.tags||[]).join(' ')+(x.src||'')).toLowerCase().includes(q));}
+  if(SQ){const q=SQ.toLowerCase();ev=ev.filter(x=>(String(x.title||'')+String(x.venue||'')+String(x.desc||'')+(x.tags||[]).join(' ')+String(x.src||'')).toLowerCase().includes(q));}
   const mo=document.getElementById('mosel');
   if(mo&&mo.value)ev=ev.filter(x=>x.date.startsWith(mo.value));
   const sort=(document.getElementById('srtsel')||{}).value||'date';
-  if(sort==='cat')ev.sort((a,b)=>a.cat.localeCompare(b.cat)||a.date.localeCompare(b.date));
+  if(sort==='cat')ev.sort((a,b)=>String(a.cat||'').localeCompare(String(b.cat||''))||a.date.localeCompare(b.date));
   else if(sort==='free')ev.sort((a,b)=>(b.isFree?1:0)-(a.isFree?1:0)||a.date.localeCompare(b.date));
-  else if(sort==='az')ev.sort((a,b)=>a.title.localeCompare(b.title));
-  else if(sort==='venue')ev.sort((a,b)=>(a.venue||'').localeCompare(b.venue||'')||a.date.localeCompare(b.date));
+  else if(sort==='az')ev.sort((a,b)=>String(a.title||'').localeCompare(String(b.title||'')));
+  else if(sort==='venue')ev.sort((a,b)=>String(a.venue||'').localeCompare(String(b.venue||''))||a.date.localeCompare(b.date));
   else ev.sort((a,b)=>a.date.localeCompare(b.date));
   return ev;
 }
@@ -821,6 +836,9 @@ function rDay(){
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;flex-shrink:0;"><polyline points="9 18 15 12 9 6"/></svg>
       </button>
       <button class="today-btn" onclick="calDay=TD();render()">Today</button>
+      <button class="today-btn" onclick="shareDay()" title="Share this day" aria-label="Share this day" style="margin-left:4px">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;margin-right:4px"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="13.5" x2="15.4" y2="17.5"/><line x1="15.4" y1="6.5" x2="8.6" y2="10.5"/></svg>Share
+      </button>
     </div>`;
   if(!devs.length){h+=`<div class="empty" style="padding:2rem"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;flex-shrink:0;"><path d="M9 2v2m6-2v2"/><path d="M3 10h18"/><path d="M4.5 4.5A2 2 0 0 0 3 6.5V19a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6.5a2 2 0 0 0-1.5-1.97"/><line x1="3" y1="3" x2="21" y2="21"/></svg><p>No events. Use ▶ to navigate forward.</p></div>`;}
   else{
@@ -845,6 +863,24 @@ function rDay(){
   return h+'</div>';
 }
 function dayNav(dir){const d=dt(calDay);d.setDate(d.getDate()+dir);calDay=iso(d);render();}
+
+function shareDay(){
+  const url=new URL(window.location.href);
+  url.searchParams.set('view','day');
+  url.searchParams.set('date',calDay);
+  const shareUrl=url.toString();
+  const title=`Events on ${fmtL(calDay)}`;
+  if(navigator.share){
+    navigator.share({title,url:shareUrl}).catch(()=>{});
+  }else{
+    navigator.clipboard.writeText(shareUrl).then(()=>{
+      const btn=event.target.closest('button');
+      if(btn){const orig=btn.innerHTML;btn.innerHTML='Copied!';setTimeout(()=>{btn.innerHTML=orig;},1500);}
+    }).catch(()=>{
+      prompt('Copy this link:',shareUrl);
+    });
+  }
+}
 
 // ── Modals ────────────────────────────────────────────────
 function showM(inner){
