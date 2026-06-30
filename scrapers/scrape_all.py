@@ -840,31 +840,104 @@ def scrape_ticketmaster():
 
 # ── DEDUPLICATION ─────────────────────────────────────────────────────────────
 
+def norm_title(title):
+    """
+    Normalize a title for fuzzy deduplication:
+    - lowercase
+    - remove all punctuation, special chars, extra words
+    - strip common suffixes that sources add (ticket deals, VIP, hotel, etc.)
+    - strip common prefixes (venue names prepended by scrapers)
+    """
+    t = title.lower()
+    # Remove common scraper-added prefixes (venue – artist)
+    # e.g. "Grand Sierra Resort – Eric Church" -> "eric church"
+    if ' – ' in t:
+        t = t.split(' – ')[-1]
+    if ' - ' in t:
+        t = t.split(' - ')[-1]
+    # Remove common noise suffixes added by ticket sites
+    noise = [
+        'ticket + hotel deals', 'hotel deals', 'vip package', 'vip',
+        'with special guest', 'special guest', 'night 1', 'night 2', 'night 3',
+        'night one', 'night two', 'presented by', 'live in concert',
+        'live', 'tour', 'the tour', 'concert', 'tickets', 'ticket',
+        '- general admission', 'general admission', 'ga',
+    ]
+    for n in noise:
+        t = re.sub(r'\b' + re.escape(n) + r'\b', '', t)
+    # Remove all non-alphanumeric characters
+    t = re.sub(r'[^a-z0-9\s]', '', t)
+    # Collapse whitespace
+    t = re.sub(r'\s+', ' ', t).strip()
+    return t
+
+
+def title_similarity(t1, t2):
+    """
+    Check if two normalized titles refer to the same event.
+    Returns True if one title starts with the other (catches artist + suffix),
+    or if they share enough words.
+    """
+    if not t1 or not t2: return False
+    # Exact match after normalization
+    if t1 == t2: return True
+    # One is a prefix of the other (e.g. "eric church" in "eric church night 1")
+    if t1.startswith(t2) or t2.startswith(t1): return True
+    # Word overlap — if 80%+ of the shorter title's words appear in the longer
+    words1 = set(t1.split())
+    words2 = set(t2.split())
+    if not words1 or not words2: return False
+    shorter = words1 if len(words1) <= len(words2) else words2
+    longer  = words1 if len(words1) >  len(words2) else words2
+    if len(shorter) == 0: return False
+    overlap = len(shorter & longer) / len(shorter)
+    return overlap >= 0.8
+
+
 def dedup(static_events, scraped_events):
     """
-    Merge static + scraped with strict deduplication.
-    Static events always win. Scraped events are only added
-    if they don't match any static event by title+date.
+    Merge static + scraped with smart deduplication.
+    Static events always win.
+    Scraped events are dropped if they match any static event by:
+      1. Exact ID match
+      2. Same date + normalized title similarity (prefix match or 80% word overlap)
+    Among scraped events themselves, same dedup logic applies.
     """
-    # Index static events by (normalized_title, date)
-    static_keys = set()
-    for ev in static_events:
-        key = (re.sub(r'[^a-z0-9]','', ev['title'].lower())[:30], ev['date'])
-        static_keys.add(key)
-
-    # Also index by ID
     static_ids = {ev['id'] for ev in static_events}
 
-    # Filter scraped: skip anything that matches a static event
+    # Build index of static (norm_title, date) pairs
+    static_index = []  # list of (norm_title, date)
+    for ev in static_events:
+        static_index.append((norm_title(ev['title']), ev['date']))
+
+    def matches_static(ev):
+        nt = norm_title(ev['title'])
+        d  = ev['date']
+        for s_nt, s_d in static_index:
+            if s_d != d: continue
+            if title_similarity(nt, s_nt): return True
+        return False
+
+    # Filter scraped against static
     unique_scraped = []
-    seen_scraped   = set()
+    seen_scraped   = []  # list of (norm_title, date) already added from scraped
+
     for ev in scraped_events:
         if ev['id'] in static_ids: continue
-        key = (re.sub(r'[^a-z0-9]','', ev['title'].lower())[:30], ev['date'])
-        if key in static_keys: continue      # static already covers this
-        if key in seen_scraped: continue     # duplicate scraped
-        seen_scraped.add(key)
-        # Also check scraped ID uniqueness
+        if matches_static(ev): continue
+
+        nt = norm_title(ev['title'])
+        d  = ev['date']
+
+        # Check against already-accepted scraped events
+        is_dup = False
+        for s_nt, s_d in seen_scraped:
+            if s_d == d and title_similarity(nt, s_nt):
+                is_dup = True
+                break
+        if is_dup: continue
+
+        seen_scraped.append((nt, d))
         unique_scraped.append(ev)
 
     merged = static_events + unique_scraped
