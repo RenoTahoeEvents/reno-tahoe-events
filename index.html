@@ -361,7 +361,7 @@ const phr=t=>{if(!t)return-1;const m=t.match(/(\d+)(?::(\d+))?\s*(AM|PM)/i);if(!
 function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 
 let SEED=[], events=[];
-let Cat='all',View='month',Reg='all',Dark=true;
+let Cat='all',View='month',Reg='all',Dark=true,Ven='all';
 let calY=2026,calM=5,calDay=TD(),ws=gws(new Date()),SQ='';
 let tipTimer=null,tipEl=null;
 
