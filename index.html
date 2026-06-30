@@ -518,7 +518,13 @@ function render(){
       const dl=document.querySelector('.day-list');
       if(dl){
         const top=dl.getBoundingClientRect().top;
-        dl.style.maxHeight=(window.innerHeight-top-8)+'px';
+        const z = Zoom || 1;
+        // getBoundingClientRect() reports in zoomed/scaled coordinates already,
+        // but window.innerHeight does NOT scale with CSS zoom — it stays the
+        // real physical viewport. Convert innerHeight into the same scaled
+        // space the element's rect is already in before subtracting.
+        const viewH = window.innerHeight / z;
+        dl.style.maxHeight=(viewH-top-8)+'px';
         dl.style.overflowY='scroll';
       }
     });
@@ -610,7 +616,9 @@ function attachMon(){
 
     // Total used = topbar + content padding(14px top+bot) + gap(6px)*2 + fbar + pills + cal-header + dow-row
     const used = topbarH + 14 + 12 + fbarH + 6 + pillsH + 6 + calHdrH + dowH;
-    const available = window.innerHeight - used;
+    const z = Zoom || 1;
+    const viewH = window.innerHeight / z;
+    const available = viewH - used;
     const rowH = Math.max(28, Math.floor(available / numRows));
 
     grid.style.gridTemplateRows = `repeat(${numRows}, ${rowH}px)`;
@@ -731,7 +739,7 @@ function attachMon(){
         // position near chip
         const rect=this.getBoundingClientRect();
         let top=rect.bottom+4,left=rect.left;
-        if(top+70>window.innerHeight)top=rect.top-70;
+        if(top+70>(window.innerHeight/(Zoom||1)))top=rect.top-70;
         if(left+230>window.innerWidth)left=window.innerWidth-240;
         tip.style.top=top+'px';
         tip.style.left=left+'px';
@@ -865,7 +873,7 @@ function trimWeekChips(){
         tipEl.textContent=snippet;tipEl.style.display='block';
         const rect=this.getBoundingClientRect();
         let top=rect.bottom+4,left=rect.left;
-        if(top+70>window.innerHeight)top=rect.top-70;
+        if(top+70>(window.innerHeight/(Zoom||1)))top=rect.top-70;
         if(left+230>window.innerWidth)left=window.innerWidth-240;
         tipEl.style.top=top+'px';tipEl.style.left=left+'px';
       },1500);
