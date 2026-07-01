@@ -210,13 +210,26 @@ def scrape_tribe(base_url, src_name, region, default_venue='', default_addr='',
     """Generic scraper for any site using The Events Calendar (Tribe) WordPress plugin."""
     events = []
     prefix = re.sub(r'[^a-z]', '', src_name.lower())[:6]
+    pages_fetched = 0
+    total_html_len = 0
+    total_items_seen = 0
+    no_date_or_title = 0
+    non_dict_items = 0
+    make_ev_rejected = 0
+    last_error = None
     for page in range(1, max_pages + 1):
         url = (f'{base_url}/wp-json/tribe/events/v1/events'
                f'?start_date={TODAY}&end_date={UNTIL}&per_page=50&page={page}')
         raw = get(url)
-        if not raw: break
+        if not raw:
+            last_error = f'no response on page {page}'
+            break
+        pages_fetched += 1
+        total_html_len += len(raw)
         try: data = json.loads(raw)
-        except: break
+        except Exception as ex:
+            last_error = f'JSON parse failed on page {page}: {ex}'
+            break
         # Defensive: some sites return a bare JSON array instead of
         # {"events": [...]}, or an error object with no "events" key at all.
         # Never assume shape — just bail out to an empty list if unexpected.
@@ -225,13 +238,19 @@ def scrape_tribe(base_url, src_name, region, default_venue='', default_addr='',
         elif isinstance(data, list):
             items = data
         else:
+            last_error = f'unexpected JSON shape on page {page}: {type(data).__name__}'
             break
         if not isinstance(items, list) or not items: break
+        total_items_seen += len(items)
         for item in items:
-            if not isinstance(item, dict): continue
+            if not isinstance(item, dict):
+                non_dict_items += 1
+                continue
             d     = parse_date(item.get('start_date', ''))
             title = clean(item.get('title', ''))
-            if not d or not title: continue
+            if not d or not title:
+                no_date_or_title += 1
+                continue
             vd    = item.get('venue') or {}
             if not isinstance(vd, dict): vd = {}
             venue = clean(vd.get('venue', '') or default_venue) or default_venue
@@ -251,8 +270,14 @@ def scrape_tribe(base_url, src_name, region, default_venue='', default_addr='',
                 (extra_tags or []),
                 link, src_name)
             if ev: events.append(ev)
+            else: make_ev_rejected += 1
         if len(items) < 50: break
         time.sleep(0.5)
+    print(f'    [{src_name}] pages_fetched={pages_fetched}, total_html_len={total_html_len}, '
+          f'items_seen={total_items_seen}, no_date_or_title={no_date_or_title}, '
+          f'non_dict_items={non_dict_items}, make_ev_rejected={make_ev_rejected}'
+          + (f', last_error={last_error!r}' if last_error else ''),
+          file=sys.stderr)
     return events
 
 # ── SCRAPERS ──────────────────────────────────────────────────────────────────
@@ -491,22 +516,33 @@ def scrape_html_events(url, src_name, region, venue, addr,
                        extra_tags=None, cat_override=None):
     """Generic HTML scraper using regex patterns."""
     raw = get(url)
-    if not raw: return []
+    if not raw:
+        print(f'    [{src_name}] no response from {url}', file=sys.stderr)
+        return []
     events = []
     prefix = re.sub(r'[^a-z]', '', src_name.lower())[:6]
     # Find all blocks containing both title and date
     # Split on likely event boundaries
     blocks = re.split(r'(?=<(?:article|div|li)[^>]*(?:event|show|listing)[^>]*>)', raw)
     seen = set()
+    no_title_or_date = 0
+    dup_skipped = 0
+    make_ev_rejected = 0
     for block in blocks[:60]:
         t_m = re.search(title_pattern, block, re.DOTALL | re.I)
         d_m = re.search(date_pattern,  block, re.DOTALL | re.I)
-        if not t_m or not d_m: continue
+        if not t_m or not d_m:
+            no_title_or_date += 1
+            continue
         title = clean(t_m.group(1))
         d     = parse_date(d_m.group(1))
-        if not title or not d: continue
+        if not title or not d:
+            no_title_or_date += 1
+            continue
         key = title[:40] + d
-        if key in seen: continue
+        if key in seen:
+            dup_skipped += 1
+            continue
         seen.add(key)
         link = url
         if link_pattern:
@@ -519,6 +555,10 @@ def scrape_html_events(url, src_name, region, venue, addr,
             f'{title} at {venue}.',
             extra_tags or [], link, src_name)
         if ev: events.append(ev)
+        else: make_ev_rejected += 1
+    print(f'    [{src_name}] html_len={len(raw)}, blocks_found={len(blocks)}, '
+          f'no_title_or_date={no_title_or_date}, dup_skipped={dup_skipped}, '
+          f'make_ev_rejected={make_ev_rejected}', file=sys.stderr)
     return events
 
 def scrape_cargo():
@@ -607,7 +647,13 @@ def scrape_atlantis():
         if not title:
             no_title += 1
             continue
-        window = raw[m.end():m.end()+300]
+        # DIAGNOSED 2026-07-01 from live run: 300 chars was too narrow — real
+        # HTML has far more attribute/class/icon markup between elements
+        # than the cleaned text suggested. Widened based on evidence, not
+        # a guess. Kept forward-only (not backward) since the date was
+        # confirmed to appear AFTER the title link, and searching backward
+        # risks grabbing a neighboring event's date instead of this one's.
+        window = raw[m.end():m.end()+800]
         d_m = re.search(
             r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s*\d{4}',
             window)
@@ -699,8 +745,13 @@ def scrape_gsr():
             return []
         events = []
         seen = set()
+        # DIAGNOSED 2026-07-01 from live run: cards_found=0 with the absolute
+        # URL requirement — real HTML almost certainly uses relative hrefs
+        # (href="/entertainment/concerts-and-shows/slug"), not the full
+        # https://www.grandsierraresort.com/... prefix. Made the domain
+        # prefix optional so it matches either form.
         card_re = re.compile(
-            r'<a[^>]+href="(https://www\.grandsierraresort\.com/entertainment/concerts-and-shows/([a-z0-9-]+))"[^>]*>(.*?)</a>',
+            r'<a[^>]+href="(?:https://www\.grandsierraresort\.com)?(/entertainment/concerts-and-shows/([a-z0-9-]+))"[^>]*>(.*?)</a>',
             re.DOTALL | re.I)
         cards_found = card_re.findall(raw)
         no_pattern_match = 0
@@ -725,11 +776,12 @@ def scrape_gsr():
             if d and d < TODAY:
                 d = parse_date(f'{mon} {day} {this_year + 1}')
             if not d: continue
+            full_url = f'https://www.grandsierraresort.com{href}' if href.startswith('/') else href
             ev = make_ev(scrape_id('gsr2', slug), title,
                          guess_cat(title), d, 'reno',
                          f'{venue} – Grand Sierra Resort', '2500 E 2nd St, Reno NV',
                          doors, None, False, f'{title} at Grand Sierra Resort {venue}.',
-                         ['Grand Sierra','Reno'], href, 'Grand Sierra Resort')
+                         ['Grand Sierra','Reno'], full_url, 'Grand Sierra Resort')
             if ev: events.append(ev)
         sample_text = clean(re.sub(r'<[^>]+>', ' ', cards_found[0][2]))[:150] if cards_found else '(no cards matched at all)'
         print(f'    html_len={len(raw)}, cards_found={len(cards_found)}, '
@@ -836,6 +888,11 @@ def scrape_ticketmaster():
         ('39.5296,-119.8138', '50', 'reno'),
         ('38.9399,-119.9772', '30', 'tahoe'),
     ]
+    total_items_seen = 0
+    no_title_or_date = 0
+    non_local_skipped = 0
+    make_ev_rejected = 0
+    total_pages_fetched = 0
     for latlong, radius, region in configs:
         url = (f'https://app.ticketmaster.com/discovery/v2/events.json'
                f'?apikey={api_key}&latlong={latlong}&radius={radius}&unit=miles'
@@ -846,14 +903,19 @@ def scrape_ticketmaster():
             paged_url = url + f'&page={tm_page}'
             raw = get(paged_url)
             if not raw: break
+            total_pages_fetched += 1
             try: data = json.loads(raw)
             except: break
             page_info = data.get('page', {})
             total_pages = page_info.get('totalPages', 1)
-            for item in (data.get('_embedded',{}).get('events') or []):
+            items = (data.get('_embedded',{}).get('events') or [])
+            total_items_seen += len(items)
+            for item in items:
                 title = (item.get('name') or '').strip()
                 d     = (item.get('dates',{}).get('start',{}).get('localDate',''))
-                if not title or not d: continue
+                if not title or not d:
+                    no_title_or_date += 1
+                    continue
                 venues  = (item.get('_embedded',{}).get('venues') or [{}])
                 vd      = venues[0]
                 venue   = (vd.get('name') or '').strip()
@@ -861,7 +923,9 @@ def scrape_ticketmaster():
                 state   = ((vd.get('state') or {}).get('stateCode',''))
                 addr_st = ((vd.get('address') or {}).get('line1',''))
                 addr    = ', '.join(filter(None,[addr_st, city, state]))
-                if not is_local(f'{title} {venue} {city}'): continue
+                if not is_local(f'{title} {venue} {city}'):
+                    non_local_skipped += 1
+                    continue
                 pr      = (item.get('priceRanges') or [{}])[0]
                 lo, hi  = pr.get('min'), pr.get('max')
                 price   = (f'${lo:.0f}–${hi:.0f}' if lo and hi else
@@ -872,9 +936,13 @@ def scrape_ticketmaster():
                     price, False, '', [],
                     item.get('url','https://www.ticketmaster.com/'), 'Ticketmaster')
                 if ev: events.append(ev)
+                else: make_ev_rejected += 1
             if tm_page >= total_pages - 1: break
             tm_page += 1
             time.sleep(0.5)
+    print(f'    pages_fetched={total_pages_fetched}, items_seen={total_items_seen}, '
+          f'no_title_or_date={no_title_or_date}, non_local_skipped={non_local_skipped}, '
+          f'make_ev_rejected={make_ev_rejected}', file=sys.stderr)
     print(f'    → {len(events)}', file=sys.stderr)
     return events
 
@@ -893,6 +961,10 @@ def scrape_songkick():
     # Songkick metro ID for Reno: 13455
     # Lake Tahoe area is covered under Reno metro
     events = []
+    total_items_seen = 0
+    no_title_or_date = 0
+    non_local_skipped = 0
+    make_ev_rejected = 0
     for metro_id, region in [('13455','reno'), ('24843','tahoe')]:
         page = 1
         while page <= 10:
@@ -908,14 +980,19 @@ def scrape_songkick():
             items = results.get('results',{}).get('event',[])
             total = results.get('totalEntries', 0)
             if not items: break
+            total_items_seen += len(items)
             for item in items:
                 title = item.get('displayName','').strip()
                 d = parse_date(item.get('start',{}).get('date',''))
-                if not title or not d: continue
+                if not title or not d:
+                    no_title_or_date += 1
+                    continue
                 venue_d = item.get('venue',{})
                 venue = venue_d.get('displayName','')
                 city  = (venue_d.get('metroArea',{}).get('displayName',''))
-                if not is_local(f'{title} {venue} {city}'): continue
+                if not is_local(f'{title} {venue} {city}'):
+                    non_local_skipped += 1
+                    continue
                 perf = item.get('performance',[])
                 artists = [p.get('displayName','') for p in perf if p.get('displayName')]
                 display = f'{venue} – {", ".join(artists)}' if artists else title
@@ -931,10 +1008,14 @@ def scrape_songkick():
                     'Songkick'
                 )
                 if ev: events.append(ev)
+                else: make_ev_rejected += 1
             if len(items) < 50 or page * 50 >= total: break
             page += 1
             time.sleep(0.5)
         time.sleep(1)
+    print(f'    items_seen={total_items_seen}, no_title_or_date={no_title_or_date}, '
+          f'non_local_skipped={non_local_skipped}, make_ev_rejected={make_ev_rejected}',
+          file=sys.stderr)
     print(f'    → {len(events)}', file=sys.stderr)
     return events
 
@@ -961,7 +1042,11 @@ def scrape_tm_venues():
     ]
 
     events = []
+    no_title_or_date = 0
+    make_ev_rejected = 0
+    venue_counts = []
     for venue_id, venue_name, venue_addr, region in TM_VENUES:
+        before = len(events)
         page = 0
         while True:
             url = (f'https://app.ticketmaster.com/discovery/v2/events.json'
@@ -978,7 +1063,9 @@ def scrape_tm_venues():
             for item in items:
                 title = (item.get('name') or '').strip()
                 d     = item.get('dates',{}).get('start',{}).get('localDate','')
-                if not title or not d: continue
+                if not title or not d:
+                    no_title_or_date += 1
+                    continue
                 pr    = (item.get('priceRanges') or [{}])[0]
                 lo,hi = pr.get('min'), pr.get('max')
                 price = (f'${lo:.0f}–${hi:.0f}' if lo and hi else
@@ -994,10 +1081,15 @@ def scrape_tm_venues():
                     'Ticketmaster'
                 )
                 if ev: events.append(ev)
+                else: make_ev_rejected += 1
             if page >= total_pages - 1: break
             page += 1
             time.sleep(0.3)
         time.sleep(0.5)
+        venue_counts.append(f'{venue_name}={len(events)-before}')
+    print(f'    per_venue: {", ".join(venue_counts)}', file=sys.stderr)
+    print(f'    no_title_or_date={no_title_or_date}, make_ev_rejected={make_ev_rejected}',
+          file=sys.stderr)
     print(f'    → {len(events)}', file=sys.stderr)
     return events
 
@@ -1073,17 +1165,27 @@ def scrape_reno_aces_v2():
     if not team_id:
         print('    could not find Reno Aces team ID via API lookup, skipping', file=sys.stderr)
         return []
+    print(f'    resolved team_id={team_id}', file=sys.stderr)
     year = date.today().year
+    total_games_seen = 0
+    away_games_skipped = 0
+    make_ev_rejected = 0
     for y in [year, year+1]:
         url = f'https://statsapi.mlb.com/api/v1/schedule?sportId=11&teamId={team_id}&season={y}&gameType=R&hydrate=venue,team'
         raw = get(url)
-        if not raw or raw.startswith('ERROR'): continue
+        if not raw or raw.startswith('ERROR'):
+            print(f'    season {y}: no response', file=sys.stderr)
+            continue
         try: data = json.loads(raw)
-        except: continue
+        except:
+            print(f'    season {y}: JSON parse failed', file=sys.stderr)
+            continue
+        season_games = 0
         for date_entry in data.get('dates',[]):
             d = date_entry.get('date','')
             if not d or d < TODAY or d > UNTIL: continue
             for game in date_entry.get('games',[]):
+                season_games += 1
                 teams = game.get('teams',{})
                 home = teams.get('home',{}).get('team',{}).get('name','')
                 away = teams.get('away',{}).get('team',{}).get('name','')
@@ -1091,7 +1193,9 @@ def scrape_reno_aces_v2():
                 is_home = 'Reno' in home
                 opponent = away if is_home else home
                 title = f'Reno Aces vs {opponent}' if is_home else f'Reno Aces @ {opponent}'
-                if not is_home: continue  # only show home games
+                if not is_home:
+                    away_games_skipped += 1
+                    continue  # only show home games
                 game_time = game.get('gameDate','')
                 ev = make_ev(
                     scrape_id('aces3', d + opponent),
@@ -1103,7 +1207,12 @@ def scrape_reno_aces_v2():
                     'https://www.milb.com/reno/schedule', 'Reno Aces / MiLB'
                 )
                 if ev: events.append(ev)
+                else: make_ev_rejected += 1
+        total_games_seen += season_games
+        print(f'    season {y}: {season_games} games in window', file=sys.stderr)
         time.sleep(0.5)
+    print(f'    total_games_seen={total_games_seen}, away_games_skipped={away_games_skipped}, '
+          f'make_ev_rejected={make_ev_rejected}', file=sys.stderr)
     print(f'    → {len(events)}', file=sys.stderr)
     return events
 
