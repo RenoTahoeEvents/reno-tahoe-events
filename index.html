@@ -1059,9 +1059,9 @@ function shareMonth(){
 function shareWeek(){
   const url=addFilterParams(new URL(window.location.href));
   url.searchParams.set('view','week');
-  url.searchParams.set('date',iso(ws));
+  url.searchParams.set('date',ws);
   const shareUrl=url.toString();
-  const title=`Events the week of ${fmtL(iso(ws))}`;
+  const title=`Events the week of ${fmtL(ws)}`;
   if(navigator.share){
     navigator.share({title,url:shareUrl}).catch(()=>{});
   }else{
