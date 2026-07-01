@@ -324,6 +324,18 @@ def scrape_live_lakeview():
     print(f'    → {len(evts)}', file=sys.stderr)
     return evts
 
+def scrape_lateniteproductions():
+    print('  Late Nite Productions…', file=sys.stderr)
+    # Multi-city concert promoter (Reno, Tahoe, Truckee, Vacaville, Fresno, etc.)
+    # Each event carries its own venue/address from the API, so we leave
+    # default_venue/default_addr blank — make_ev()'s is_local() check strips
+    # out any non Reno/Tahoe-area shows (Vacaville, Fresno, Grass Valley, etc.)
+    evts = scrape_tribe('https://lateniteproductions.com', 'Late Nite Productions',
+                        'reno', '', '',
+                        extra_tags=['concert', 'live music'], max_pages=15)
+    print(f'    → {len(evts)}', file=sys.stderr)
+    return evts
+
 # ── HTML SCRAPERS for venues without Tribe/WordPress APIs ─────────────────────
 
 def scrape_html_events(url, src_name, region, venue, addr,
@@ -1267,6 +1279,7 @@ ALL_SCRAPERS = {
     'val':     scrape_valhalla,
     'sky':     scrape_skytavern,
     'lal':     scrape_live_lakeview,
+    'lnp':     scrape_lateniteproductions,
     'cargo':   scrape_cargo,
     'alpine':  scrape_alpine,
     'nugget':  scrape_nugget,
