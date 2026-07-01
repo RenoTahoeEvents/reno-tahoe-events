@@ -125,11 +125,23 @@ def scrape_id(prefix, uid):
     return f's_{prefix}_{h}'
 
 def parse_date(s):
+    # CONFIRMED CORE BUG, found 2026-07-01 via converging diagnostic evidence
+    # from two independent scrapers (GSR and Atlantis, both freshly built
+    # this session): s[:len(fmt)] sliced the input to the CHARACTER LENGTH
+    # OF THE FORMAT STRING ITSELF (e.g. len('%B %d, %Y') == 10), not a
+    # sensible date length — so "July 1, 2026" became "July 1, 20",
+    # silently truncating the year and failing to parse EVERY time. ISO
+    # dates only ever worked by accident, via the regex fallback at the
+    # bottom, which was never affected by this slicing bug at all. This
+    # means every human-readable date format (used by any custom HTML
+    # scraper, not just GSR/Atlantis) has been silently broken for as
+    # long as this function has existed. Removed the slicing entirely —
+    # each format is now tried against the trimmed string as-is.
     s = (s or '').strip()
     for fmt in ('%Y-%m-%dT%H:%M:%S','%Y-%m-%dT%H:%M:%SZ','%Y-%m-%d',
                 '%m/%d/%Y','%B %d, %Y','%b %d, %Y','%b. %d, %Y','%d %B %Y'):
         try:
-            return datetime.strptime(s[:len(fmt)], fmt).strftime('%Y-%m-%d')
+            return datetime.strptime(s, fmt).strftime('%Y-%m-%d')
         except: pass
     m = re.search(r'(\d{4}-\d{2}-\d{2})', s)
     return m.group(1) if m else None
@@ -659,6 +671,12 @@ def scrape_atlantis():
             window)
         if not d_m:
             no_date += 1
+            if no_date <= 2:
+                # Same technique that found the real GSR bug: stop guessing,
+                # print the actual raw text so next run shows the real
+                # structure instead of another blind window-size guess.
+                sample = clean(re.sub(r'<[^>]+>', ' ', window))[:250]
+                print(f'    [Atlantis] no-date sample ({slug}): {sample!r}', file=sys.stderr)
             continue
         d = parse_date(d_m.group(0))
         if not d:
@@ -772,9 +790,14 @@ def scrape_gsr():
             doors = m.group(6)
             if not title or len(title) < 2: continue
             this_year = date.today().year
-            d = parse_date(f'{mon} {day} {this_year}')
+            # CONFIRMED BUG, fixed 2026-07-01 from live diagnostic evidence:
+            # parse_date() requires a comma before the year ("Jul 7, 2026"),
+            # but this was building the string without one ("Jul 7 2026"),
+            # so every single date silently failed to parse — this is why
+            # cards_found=52, pattern_mismatch=0, but final count was 0.
+            d = parse_date(f'{mon} {day}, {this_year}')
             if d and d < TODAY:
-                d = parse_date(f'{mon} {day} {this_year + 1}')
+                d = parse_date(f'{mon} {day}, {this_year + 1}')
             if not d: continue
             full_url = f'https://www.grandsierraresort.com{href}' if href.startswith('/') else href
             ev = make_ev(scrape_id('gsr2', slug), title,
