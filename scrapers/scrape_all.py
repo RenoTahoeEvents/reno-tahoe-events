@@ -342,6 +342,81 @@ def scrape_lateniteproductions():
     print(f'    → {len(evts)}', file=sys.stderr)
     return evts
 
+# ── TIXR — generic scraper for any venue selling through Tixr ─────────────
+# Tixr doesn't have a public unauthenticated API (their real API needs a
+# private key + HMAC signature only the venue/organizer has). But every
+# individual Tixr event page is server-rendered HTML with standard
+# meta/OG tags (title, event:start_time, street-address, lat/long,
+# tixr-eventId) baked into <head> — that's a much more stable target than
+# guessing at page layout. Strategy: fetch the group's page, pull out
+# links to individual event pages, then read the meta tags off each one.
+def scrape_tixr_group(group_slug, src_name, region, default_venue='', default_addr=''):
+    events = []
+    group_url = f'https://www.tixr.com/groups/{group_slug}'
+    raw = get(group_url)
+    if not raw: return []
+    # Event links look like /groups/{group_slug}/events/{slug}-{numeric_id}
+    slugs = sorted(set(re.findall(
+        rf'/groups/{re.escape(group_slug)}/events/([a-z0-9-]+)', raw, re.I)))
+    for slug in slugs[:100]:
+        ev_url = f'https://www.tixr.com/groups/{group_slug}/events/{slug}'
+        ev_raw = get(ev_url)
+        if not ev_raw: continue
+        def meta(name):
+            m = re.search(
+                rf'<meta[^>]+(?:name|property)=["\']{re.escape(name)}["\'][^>]+content=["\']([^"\']*)["\']',
+                ev_raw, re.I)
+            return html.unescape(m.group(1)) if m else ''
+        raw_title = meta('og:title') or meta('twitter:title')
+        # Titles come as "X Tickets at {Venue} in {City} by {Promoter}" —
+        # pull the specific room/venue out when present (handles multi-room
+        # venues like Crystal Bay's Crown Room vs Red Room), otherwise fall
+        # back to the group-level default.
+        venue_m = re.search(r'Tickets at (.+?) in \w', raw_title)
+        venue = html.unescape(venue_m.group(1)).strip() if venue_m else default_venue
+        title = re.sub(r'\s*Tickets at.*$', '', raw_title).strip() or raw_title
+        start_raw = meta('event:start_time')
+        d = parse_date(start_raw)
+        if not title or not d: continue
+        addr_street = meta('og:street-address')
+        addr_city   = meta('og:locality')
+        addr_state  = meta('og:region')
+        addr = ', '.join(filter(None, [addr_street, addr_city, addr_state])) or default_addr
+        desc = meta('og:description') or meta('description')
+        keywords = [k.strip() for k in meta('keywords').split(',') if k.strip()][:5]
+        ev = make_ev(scrape_id('tixr', meta('tixr-eventId') or slug),
+                     title, guess_cat(title, desc), d, region,
+                     venue, addr, to_12h(start_raw), None, False,
+                     desc, keywords, ev_url, src_name)
+        if ev: events.append(ev)
+        time.sleep(0.3)
+    return events
+
+def scrape_tixr_cypress():
+    print('  Cypress (Tixr)…', file=sys.stderr)
+    evts = scrape_tixr_group('cypressreno', 'Cypress Reno', 'reno',
+                              'Cypress', 'Midtown Reno, NV')
+    print(f'    → {len(evts)}', file=sys.stderr)
+    return evts
+
+def scrape_tixr_glowplaza():
+    print('  J Resort Glow Plaza (Tixr)…', file=sys.stderr)
+    evts = scrape_tixr_group('glowplaza', "J Resort's Glow Plaza", 'reno',
+                              "J Resort's Glow Plaza", '670 W 4th St, Reno NV')
+    print(f'    → {len(evts)}', file=sys.stderr)
+    return evts
+
+def scrape_tixr_crystalbay():
+    print('  Crystal Bay Casino (Tixr)…', file=sys.stderr)
+    # Confirmed by Matt (friend works there): all CBC ticketing runs through
+    # Tixr. Two rooms under one group — Crown Room and Red Room — handled
+    # automatically since scrape_tixr_group() pulls the specific room name
+    # out of each event's title.
+    evts = scrape_tixr_group('crystalbaycasino', 'Crystal Bay Casino', 'tahoe',
+                              'Crystal Bay Casino', '14 State Route 28, Crystal Bay NV')
+    print(f'    → {len(evts)}', file=sys.stderr)
+    return evts
+
 # ── HTML SCRAPERS for venues without Tribe/WordPress APIs ─────────────────────
 
 def scrape_html_events(url, src_name, region, venue, addr,
@@ -380,42 +455,69 @@ def scrape_html_events(url, src_name, region, venue, addr,
     return events
 
 def scrape_cargo():
+    # FIXED 2026-07-01: was hitting cargoconcerthall.com, which is a dead/
+    # misconfigured old domain (that's what caused the TLS alert every run).
+    # Cargo's real current site is cargoreno.com — confirmed alive, static
+    # HTML (Webflow), NOT behind TLS blocking. Not a Tribe/WordPress site
+    # though, so using a proximity-based HTML scraper anchored on their
+    # distinctive /product/{slug} event links, which is a stable pattern
+    # even without seeing their exact div/class structure. Unverified
+    # against raw HTML in production — test this one and send me output.
     print('  Cargo Concert Hall…', file=sys.stderr)
-    raw = get('https://cargoconcerthall.com/events/')
+    raw = get('https://www.cargoreno.com/upcoming-events')
     if not raw:
         print('    → 0', file=sys.stderr)
         return []
     events = []
-    # Cargo uses a standard events page — try Tribe API first
-    evts = scrape_tribe('https://cargoconcerthall.com', 'Cargo Concert Hall',
-                        'reno', 'Cargo Concert Hall – Whitney Peak Hotel',
-                        '255 N Virginia St, Reno',
-                        extra_tags=['Cargo', 'Whitney Peak', 'Downtown Reno'])
-    if not evts:
-        # Fall back to HTML
-        blocks = re.findall(r'<(?:div|article)[^>]*event[^>]*>(.*?)</(?:div|article)>',
-                            raw, re.DOTALL)
-        seen = set()
-        for block in blocks[:200]:
-            t_m = re.search(r'<h[2-4][^>]*>(.*?)</h[2-4]>', block, re.DOTALL)
-            d_m = re.search(r'(\w+ \d{1,2},?\s*\d{4}|\d{4}-\d{2}-\d{2})', block)
-            if not t_m or not d_m: continue
-            title = clean(t_m.group(1))
-            d     = parse_date(d_m.group(1))
-            if not d or title in seen: continue
-            seen.add(title)
-            ev = make_ev(scrape_id('cargo', title+d), title,
-                         guess_cat(title), d, 'reno',
-                         'Cargo Concert Hall – Whitney Peak Hotel',
-                         '255 N Virginia St, Reno',
-                         None, None, False, f'{title} at Cargo Concert Hall.',
-                         ['Cargo', 'Whitney Peak'], 'https://cargoconcerthall.com/',
-                         'Cargo Concert Hall')
-            if ev: evts.append(ev)
-    print(f'    → {len(evts)}', file=sys.stderr)
-    return evts
+    seen = set()
+    # Each event block contains a /product/{slug} link plus a nearby
+    # "#### Title" heading and Mon/Day date markers. Search in a window
+    # around each product link rather than assuming exact tag structure.
+    for m in re.finditer(r'/product/([a-z0-9-]+)', raw):
+        slug = m.group(1)
+        if slug in seen: continue
+        seen.add(slug)
+        window = raw[max(0, m.start()-600):m.start()+50]
+        # Title: look for "#### Title" or "### Title" markdown-style heading,
+        # or <h3-5> tag with text, nearest to the link
+        t_m = re.findall(r'#{3,5}\s+([^\n#]{3,80})', window)
+        title = clean(t_m[-1]) if t_m else ''
+        # Date: look for 3-letter month + day number pattern near the link
+        d_m = re.findall(
+            r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+(\d{1,2})\b',
+            window)
+        d = None
+        if d_m:
+            mon, day = d_m[-1]
+            this_year = date.today().year
+            d_try = parse_date(f'{mon} {day} {this_year}')
+            # Cargo's page lists events chronologically going forward; if the
+            # parsed date looks like it's already in the past, it must mean
+            # the event is actually next year (e.g. scraping in Dec for a
+            # Jan show)
+            if d_try and d_try < TODAY:
+                d_try = parse_date(f'{mon} {day} {this_year + 1}')
+            d = d_try
+        if not title or not d or title.lower() in ('reno','details','see all'):
+            continue
+        link = f'https://www.cargoreno.com/product/{slug}'
+        ev = make_ev(scrape_id('cargo', slug), title,
+                     guess_cat(title), d, 'reno',
+                     'Cargo Concert Hall', '255 N Virginia St, Reno NV',
+                     None, None, False, f'{title} at Cargo Concert Hall.',
+                     ['Cargo', 'Downtown Reno'], link, 'Cargo Concert Hall')
+        if ev: events.append(ev)
+    print(f'    → {len(events)}', file=sys.stderr)
+    return events
 
 def scrape_alpine():
+    # NOTE 2026-07-01: thealpine-reno.com no longer runs the Tribe plugin —
+    # confirmed it's now on the "Classic Venue" WP theme with TicketWeb
+    # ticketing. The HTML fallback below rarely matches (titles aren't in
+    # h2-h4 tags), but it's harmless — no crash, just returns 0. Rebuilding
+    # this properly would need a TicketWeb-specific parser (unverified raw
+    # HTML structure — not doing it blind). Alpine shows also frequently
+    # appear on Ticketmaster/Songkick, so coverage isn't fully lost.
     print('  The Alpine…', file=sys.stderr)
     evts = scrape_tribe('https://www.thealpine-reno.com', 'The Alpine',
                         'reno', 'The Alpine', '324 E 4th St, Reno NV',
@@ -572,74 +674,22 @@ def scrape_gsr():
 
 
 def scrape_pioneer():
-    print('  Pioneer Center…', file=sys.stderr)
-    raw = get('https://www.pioneercenter.com/events/')
-    if not raw:
-        print('    → 0', file=sys.stderr)
-        return []
-    evts = scrape_tribe('https://www.pioneercenter.com', 'Pioneer Center',
-                        'reno', 'Pioneer Center for the Performing Arts',
-                        '100 S Virginia St, Reno',
-                        extra_tags=['Pioneer Center', 'performing arts'])
-    if not evts:
-        events = []
-        seen = set()
-        blocks = re.findall(r'<(?:div|article)[^>]*event[^>]*>(.*?)</(?:div|article)>',
-                            raw, re.DOTALL)
-        for block in blocks[:200]:
-            t_m = re.search(r'<h[2-4][^>]*>(.*?)</h[2-4]>', block, re.DOTALL)
-            d_m = re.search(r'(\w+ \d{1,2},?\s*\d{4}|\d{4}-\d{2}-\d{2})', block)
-            if not t_m or not d_m: continue
-            title = clean(t_m.group(1))
-            d     = parse_date(d_m.group(1))
-            if not d or title in seen: continue
-            seen.add(title)
-            ev = make_ev(scrape_id('pioc', title+d), title,
-                         guess_cat(title), d, 'reno',
-                         'Pioneer Center for the Performing Arts',
-                         '100 S Virginia St, Reno',
-                         None, '$25–$95', False,
-                         f'{title} at Pioneer Center.',
-                         ['Pioneer Center', 'Reno'],
-                         'https://www.pioneercenter.com/', 'Pioneer Center')
-            if ev: events.append(ev)
-        evts = events
-    print(f'    → {len(evts)}', file=sys.stderr)
-    return evts
+    # DISABLED 2026-07-01: pioneercenter.com 404s (site restructured, not
+    # Tribe-based). CONFIRMED not a real coverage gap: Downtown Reno
+    # Partnership (the 'drp' scraper, already returning ~76 events) lists
+    # Pioneer Center as one of its tracked venues and pulls its shows
+    # (Hell's Kitchen, Reno Phil concerts, etc.) directly. Building a
+    # dedicated Pioneer Center scraper would just duplicate that.
+    return []
 
 def scrape_crystal_bay():
-    print('  Crystal Bay Casino…', file=sys.stderr)
-    raw = get('https://www.crystalbaycasino.com/entertainment/')
-    if not raw:
-        print('    → 0', file=sys.stderr)
-        return []
-    events = []
-    seen = set()
-    # Try tixr embeds first
-    tixr_ids = re.findall(r'tixr\.com/[^"\']*?(\d{4,})', raw)
-    # Parse HTML blocks
-    blocks = re.split(r'(?=<(?:div|article)[^>]*(?:show|event|listing)[^>]*>)', raw)
-    for block in blocks[:200]:
-        t_m = re.search(r'<h[2-4][^>]*>(.*?)</h[2-4]>', block, re.DOTALL)
-        d_m = re.search(r'(\w+ \d{1,2},?\s*\d{4}|\d{4}-\d{2}-\d{2})', block)
-        if not t_m or not d_m: continue
-        title = clean(t_m.group(1))
-        d     = parse_date(d_m.group(1))
-        if not d or title in seen: continue
-        seen.add(title)
-        l_m = re.search(r'href="(https?://[^"]+)"', block)
-        link = l_m.group(1) if l_m else 'https://www.crystalbaycasino.com/entertainment/'
-        ev = make_ev(scrape_id('cbc2', title+d), title,
-                     guess_cat(title), d, 'tahoe',
-                     'Crystal Bay Casino – Crown Room',
-                     '14 NV-28, Crystal Bay, NV',
-                     None, '$20–$50', False,
-                     f'{title} at Crystal Bay Casino Crown Room. 21+.',
-                     ['Crystal Bay', 'Lake Tahoe', '21+'],
-                     link, 'Crystal Bay Casino')
-        if ev: events.append(ev)
-    print(f'    → {len(events)}', file=sys.stderr)
-    return events
+    # REPLACED 2026-07-01: this used to scrape crystalbaycasino.com HTML
+    # directly (unreliable, was returning 0). Confirmed (via Matt's friend
+    # who works there) that CBC does ALL ticketing through Tixr — using
+    # that instead now, see scrape_tixr_crystalbay() / 'cbc' registration
+    # below. Keeping this function only so nothing else in the file that
+    # might reference it breaks; it's no longer called.
+    return scrape_tixr_crystalbay()
 
 def scrape_bba():
     print('  Big Blue Adventure…', file=sys.stderr)
@@ -673,17 +723,15 @@ def scrape_bba():
     return events
 
 def scrape_bartley_ranch():
-    print('  Bartley Ranch (Washoe County)…', file=sys.stderr)
-    raw = get('https://www.washoecounty.gov/parks/facilities/bartley_ranch.php')
-    if not raw:
-        print('    → 0', file=sys.stderr)
-        return []
-    evts = scrape_tribe('https://www.washoecounty.gov', 'Washoe County Parks',
-                        'reno', 'Bartley Ranch – Robert Z. Hawkins Amphitheater',
-                        '6000 Bartley Ranch Rd, Reno NV',
-                        extra_tags=['Bartley Ranch', 'outdoor', 'amphitheater'])
-    print(f'    → {len(evts)}', file=sys.stderr)
-    return evts
+    # DISABLED 2026-07-01: URL was wrong (facilities/bartley_ranch.php
+    # doesn't exist) AND washoecounty.gov is a government CMS, not
+    # WordPress — the Tribe API call was never going to work either.
+    # Correct current page is washoecounty.gov/parks/parks/park_programs.php
+    # but that's a different platform requiring its own scraper — not
+    # doing it blind without seeing the raw HTML. Bartley Ranch's actual
+    # events (Evenings on the Ranch, Living History Day) are seasonal and
+    # low-volume — lower priority to rebuild.
+    return []
 
 def scrape_reno_aces():
     print('  Reno Aces (MiLB)…', file=sys.stderr)
@@ -917,50 +965,37 @@ def scrape_tm_venues():
 
 # ── NEVADA MUSEUM OF ART ──────────────────────────────────────────────────
 def scrape_nma():
-    print('  Nevada Museum of Art…', file=sys.stderr)
-    evts = scrape_tribe(
-        'https://nevadaart.org', 'Nevada Museum of Art',
-        'reno', 'Nevada Museum of Art', '160 W Liberty St, Reno NV',
-        extra_tags=['art', 'museum', 'exhibits', 'Reno']
-    )
-    print(f'    → {len(evts)}', file=sys.stderr)
-    return evts
+    # DISABLED 2026-07-01: nevadaart.org 404s — confirmed the museum uses
+    # Blackbaud Altru for its calendar (nevadaart.org/calendar/), not
+    # WordPress/Tribe at all, so this was never going to work. CONFIRMED
+    # not a real coverage gap either: Downtown Reno Partnership ('drp')
+    # already lists Nevada Museum of Art as a tracked venue.
+    return []
 
 
 # ── RENO PHILHARMONIC ─────────────────────────────────────────────────────
 def scrape_reno_phil():
-    print('  Reno Philharmonic…', file=sys.stderr)
-    evts = scrape_tribe(
-        'https://www.renophilharmonic.com', 'Reno Philharmonic',
-        'reno', 'Pioneer Center for the Performing Arts', '100 S Virginia St, Reno',
-        extra_tags=['classical', 'orchestra', 'symphony', 'Reno Philharmonic']
-    )
-    print(f'    → {len(evts)}', file=sys.stderr)
-    return evts
+    # DISABLED 2026-07-01: renophilharmonic.com is gone entirely — the
+    # org's site moved to renophil.com. But their ticket calendar
+    # (renophil.my.salesforce-sites.com) requires JavaScript (Salesforce
+    # Commerce), so even the correct domain isn't plain-HTTP scrapable.
+    # Reno Phil performs almost exclusively at Pioneer Center, which is
+    # already tracked through Downtown Reno Partnership ('drp'), so this
+    # isn't a full coverage gap.
+    return []
 
 
 # ── WASHOE COUNTY PARKS (Bartley Ranch, Bowers Mansion etc) ──────────────
 def scrape_washoe_parks():
-    print('  Washoe County Parks…', file=sys.stderr)
-    evts = scrape_tribe(
-        'https://www.washoecounty.gov', 'Washoe County Parks',
-        'reno', 'Washoe County Parks', 'Reno, NV',
-        extra_tags=['outdoor', 'parks', 'Washoe County', 'free']
-    )
-    # Also try their dedicated events calendar
-    if not evts:
-        raw = get('https://www.washoecounty.gov/events/')
-        if raw and not raw.startswith('ERROR'):
-            evts = scrape_html_events(
-                'https://www.washoecounty.gov/events/',
-                'Washoe County Parks', 'reno',
-                'Washoe County Parks', 'Reno, NV',
-                r'<h[2-4][^>]*>(.*?)</h[2-4]>',
-                r'(\w+ \d{1,2},?\s*\d{4}|\d{4}-\d{2}-\d{2})',
-                extra_tags=['outdoor','parks','Washoe County']
-            )
-    print(f'    → {len(evts)}', file=sys.stderr)
-    return evts
+    # DISABLED 2026-07-01: washoecounty.gov 404s on both the Tribe API and
+    # /events/ — confirmed the county's site is a government CMS
+    # (.php-based pages like /parks/calendar.php), not WordPress at all.
+    # Correct current page found: washoecounty.gov/parks/calendar.php —
+    # but building a scraper for an unfamiliar govt CMS without seeing its
+    # raw HTML risks a bad guess. Not doing it blind. County park events
+    # (concerts, campfire programs) are lower-volume/seasonal — lower
+    # priority to rebuild than the concert venues.
+    return []
 
 
 # ── TAHOE BLUE EVENT CENTER ───────────────────────────────────────────────
@@ -1164,6 +1199,8 @@ ALL_SCRAPERS = {
     'sky':     scrape_skytavern,
     'lal':     scrape_live_lakeview,
     'lnp':     scrape_lateniteproductions,
+    'tixr_cy': scrape_tixr_cypress,
+    'tixr_gp': scrape_tixr_glowplaza,
     'cargo':   scrape_cargo,
     'alpine':  scrape_alpine,
     'nugget':  scrape_nugget,
