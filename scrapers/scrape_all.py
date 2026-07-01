@@ -63,6 +63,23 @@ def get(url, headers=None, timeout=15):
         with urlopen(req, timeout=timeout) as r:
             return r.read().decode('utf-8', errors='replace')
     except Exception as ex:
+        # Some sites (e.g. cargoconcerthall.com) throw a TLS handshake
+        # error under Python's default SSL context but work fine with a
+        # standard browser. Retry once with a relaxed context before
+        # giving up — this is NOT disabling certificate validation for
+        # every request, only as a last-resort fallback on failure.
+        if 'SSL' in str(ex) or 'TLS' in str(ex):
+            try:
+                import ssl
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                req = Request(url, headers=h)
+                with urlopen(req, timeout=timeout, context=ctx) as r:
+                    return r.read().decode('utf-8', errors='replace')
+            except Exception as ex2:
+                print(f'  GET error {url[:70]}: {ex2}', file=sys.stderr)
+                return None
         print(f'  GET error {url[:70]}: {ex}', file=sys.stderr)
         return None
 
@@ -191,13 +208,23 @@ def scrape_tribe(base_url, src_name, region, default_venue='', default_addr='',
         if not raw: break
         try: data = json.loads(raw)
         except: break
-        items = data.get('events', [])
-        if not items: break
+        # Defensive: some sites return a bare JSON array instead of
+        # {"events": [...]}, or an error object with no "events" key at all.
+        # Never assume shape — just bail out to an empty list if unexpected.
+        if isinstance(data, dict):
+            items = data.get('events', [])
+        elif isinstance(data, list):
+            items = data
+        else:
+            break
+        if not isinstance(items, list) or not items: break
         for item in items:
+            if not isinstance(item, dict): continue
             d     = parse_date(item.get('start_date', ''))
             title = clean(item.get('title', ''))
             if not d or not title: continue
             vd    = item.get('venue') or {}
+            if not isinstance(vd, dict): vd = {}
             venue = clean(vd.get('venue', '') or default_venue) or default_venue
             addr  = ', '.join(filter(None, [
                 clean(vd.get('address', '')),
@@ -229,11 +256,12 @@ def scrape_downtown_reno():
     return evts
 
 def scrape_reno_scene():
-    print('  The Reno Scene…', file=sys.stderr)
-    evts = scrape_tribe('https://www.therenoscene.com', 'The Reno Scene',
-                        'reno', 'Reno', 'Reno, NV', max_pages=8)
-    print(f'    → {len(evts)}', file=sys.stderr)
-    return evts
+    # DISABLED 2026-07-01: therenoscene.com is not running the Tribe events
+    # plugin (confirmed 404 on /wp-json/tribe/events/v1/events — it's a
+    # custom Elementor/WP-Rocket build with no public JSON API). Needs a
+    # purpose-built HTML scraper, not the generic Tribe one. Skipping
+    # cleanly instead of throwing an HTTP error every hourly run.
+    return []
 
 def scrape_holland():
     print('  Holland Project…', file=sys.stderr)
@@ -244,13 +272,10 @@ def scrape_holland():
     return evts
 
 def scrape_artown():
-    print('  Artown…', file=sys.stderr)
-    evts = scrape_tribe('https://renoisartown.com', 'Artown',
-                        'reno', 'Reno', 'Reno, NV',
-                        title_prefix='Artown – ',
-                        extra_tags=['Artown', 'arts', 'Reno'])
-    print(f'    → {len(evts)}', file=sys.stderr)
-    return evts
+    # DISABLED 2026-07-01: renoisartown.com resets the connection on the
+    # Tribe API request (likely bot/WAF protection, not a URL problem).
+    # Skipping cleanly instead of eating a timeout every hourly run.
+    return []
 
 def scrape_visit_tahoe():
     print('  Visit Lake Tahoe…', file=sys.stderr)
@@ -261,19 +286,14 @@ def scrape_visit_tahoe():
     return evts
 
 def scrape_thisisreno():
-    print('  This Is Reno…', file=sys.stderr)
-    evts = scrape_tribe('https://thisisreno.com', 'This Is Reno',
-                        'reno', 'Reno', 'Reno, NV')
-    print(f'    → {len(evts)}', file=sys.stderr)
-    return evts
+    # DISABLED 2026-07-01: thisisreno.com returns 403 Forbidden on the
+    # Tribe API — bot-blocked. Skipping cleanly instead of erroring.
+    return []
 
 def scrape_gotahoenorth():
-    print('  Go Tahoe North…', file=sys.stderr)
-    evts = scrape_tribe('https://www.gotahoenorth.com', 'Go Tahoe North',
-                        'tahoe', 'North Lake Tahoe', 'North Lake Tahoe, CA',
-                        extra_tags=['North Tahoe'])
-    print(f'    → {len(evts)}', file=sys.stderr)
-    return evts
+    # DISABLED 2026-07-01: gotahoenorth.com 404s on the Tribe API — site
+    # has moved off the plugin or restructured. Needs manual re-check.
+    return []
 
 def scrape_southtahoenow():
     print('  South Tahoe Now…', file=sys.stderr)
@@ -284,45 +304,31 @@ def scrape_southtahoenow():
     return evts
 
 def scrape_askreno():
-    print('  Ask Reno…', file=sys.stderr)
-    evts = scrape_tribe('https://ask-reno.com', 'Ask Reno',
-                        'reno', 'Reno', 'Reno, NV')
-    print(f'    → {len(evts)}', file=sys.stderr)
-    return evts
+    # DISABLED 2026-07-01: ask-reno.com 404s on the Tribe API — site has
+    # moved off the plugin or restructured. Needs manual re-check.
+    return []
 
 def scrape_bruka():
-    print('  Brüka Theatre…', file=sys.stderr)
-    evts = scrape_tribe('https://www.bruka.org', 'Brüka Theatre',
-                        'reno', 'Brüka Theatre', '99 N Virginia St, Reno NV',
-                        extra_tags=['theater', 'Brüka', 'downtown Reno'])
-    print(f'    → {len(evts)}', file=sys.stderr)
-    return evts
+    # DISABLED 2026-07-01: confirmed Brüka Theatre has migrated off
+    # WordPress entirely — now on Squarespace with SimpleTix ticketing
+    # (bruka.org/events + brukatheatre.simpletix.com). Needs a new
+    # Squarespace-specific scraper, not the Tribe one.
+    return []
 
 def scrape_valhalla():
-    print('  Valhalla Tahoe…', file=sys.stderr)
-    evts = scrape_tribe('https://www.valhallatahoe.com', 'Valhalla Tahoe',
-                        'tahoe', 'Valhalla Tahoe – Heller Estate',
-                        '1 Valhalla Rd, South Lake Tahoe, CA',
-                        extra_tags=['Valhalla', 'West Shore', 'outdoor'])
-    print(f'    → {len(evts)}', file=sys.stderr)
-    return evts
+    # DISABLED 2026-07-01: valhallatahoe.com returns 403 Forbidden on the
+    # Tribe API — bot-blocked. Skipping cleanly instead of erroring.
+    return []
 
 def scrape_skytavern():
-    print('  Sky Tavern…', file=sys.stderr)
-    evts = scrape_tribe('https://www.skytavern.org', 'Sky Tavern Bike Park',
-                        'reno', 'Sky Tavern Bike Park', '2800 Mt Rose Hwy, Reno NV',
-                        extra_tags=['Sky Tavern', 'MTB', '8000ft'])
-    print(f'    → {len(evts)}', file=sys.stderr)
-    return evts
+    # DISABLED 2026-07-01: skytavern.org 404s on the Tribe API — site has
+    # moved off the plugin or restructured. Needs manual re-check.
+    return []
 
 def scrape_live_lakeview():
-    print('  Live at Lakeview…', file=sys.stderr)
-    evts = scrape_tribe('https://liveatlakeview.com', 'Live at Lakeview',
-                        'tahoe', 'Lakeview Commons – South Lake Tahoe',
-                        'El Dorado Beach, South Lake Tahoe, CA',
-                        extra_tags=['free', 'outdoor', 'Lake Tahoe', 'Lakeview Commons'])
-    print(f'    → {len(evts)}', file=sys.stderr)
-    return evts
+    # DISABLED 2026-07-01: liveatlakeview.com 404s on the Tribe API — site
+    # has moved off the plugin or restructured. Needs manual re-check.
+    return []
 
 def scrape_lateniteproductions():
     print('  Late Nite Productions…', file=sys.stderr)
@@ -428,33 +434,9 @@ def scrape_alpine():
     return evts
 
 def scrape_nugget():
-    print('  Nugget Casino…', file=sys.stderr)
-    raw = get('https://www.cnty.com/nugget/entertainment')
-    if not raw:
-        print('    → 0', file=sys.stderr)
-        return []
-    events = []
-    seen = set()
-    blocks = re.findall(r'<(?:div|article|li)[^>]*(?:event|show|entertainment)[^>]*>(.*?)</(?:div|article|li)>',
-                        raw, re.DOTALL)
-    for block in blocks[:200]:
-        t_m = re.search(r'<h[2-4][^>]*>(.*?)</h[2-4]>', block, re.DOTALL)
-        d_m = re.search(r'(\w+ \d{1,2},?\s*\d{4}|\d{4}-\d{2}-\d{2})', block)
-        if not t_m or not d_m: continue
-        title = clean(t_m.group(1))
-        d     = parse_date(d_m.group(1))
-        if not d or title in seen: continue
-        seen.add(title)
-        l_m = re.search(r'href="(https?://[^"]+)"', block)
-        link = l_m.group(1) if l_m else 'https://www.cnty.com/nugget/entertainment'
-        ev = make_ev(scrape_id('nug2', title+d), title,
-                     guess_cat(title), d, 'reno',
-                     'Nugget Casino Resort', '1100 Nugget Ave, Sparks NV',
-                     None, None, False, f'{title} at the Nugget Casino Resort.',
-                     ['Nugget Casino', 'Sparks'], link, 'Nugget Casino Resort')
-        if ev: events.append(ev)
-    print(f'    → {len(events)}', file=sys.stderr)
-    return events
+    # DISABLED 2026-07-01: cnty.com returns 403 Forbidden — bot-blocked.
+    # Skipping cleanly instead of erroring every hourly run.
+    return []
 
 def scrape_atlantis():
     print('  Atlantis Casino…', file=sys.stderr)
@@ -735,130 +717,24 @@ def scrape_reno_aces():
 # ── RESIDENT ADVISOR (GraphQL) ────────────────────────────────────────────────
 
 def scrape_ra():
-    print('  Resident Advisor…', file=sys.stderr)
-    QUERY = """
-    query GetAreaEvents($areaId:ID!,$from:DateTime!,$to:DateTime!,$page:Int!){
-      eventListings(filters:{areas:{id:$areaId},listingDate:{gte:$from,lte:$to}}
-        pageSize:100 page:$page sort:{listingDate:{order:ASCENDING}}){
-        totalResults
-        data{id listingDate event{id title startTime isFree content
-          genres{name} venue{id name address area{name}}
-          artists{name} tickets{salePrice{value}}}}}}"""
-    RA_HDR = {
-        'Content-Type': 'application/json',
-        'Origin': 'https://ra.co',
-        'Referer': 'https://ra.co/events/us/nevada',
-        'ra-content-language': 'en',
-        'x-ra-platform': 'web',
-        'User-Agent': UA,
-    }
-    events = []
-    from_dt = TODAY + 'T00:00:00'
-    to_dt   = UNTIL + 'T23:59:59'
-    for area_id, region in [('203','reno'), ('13','tahoe')]:
-        page = 1
-        while True:
-            resp = post_json('https://ra.co/graphql',
-                {'query': QUERY, 'variables': {
-                    'areaId': area_id, 'from': from_dt,
-                    'to': to_dt, 'page': page}}, RA_HDR)
-            if not resp: break
-            body     = resp.get('data',{}).get('eventListings',{})
-            total    = body.get('totalResults', 0)
-            listings = body.get('data', [])
-            for listing in listings:
-                ev_d  = listing.get('event') or {}
-                title = (ev_d.get('title') or '').strip()
-                if not title: continue
-                d = parse_date(listing.get('listingDate') or ev_d.get('startTime',''))
-                if not d: continue
-                vd    = ev_d.get('venue') or {}
-                venue = (vd.get('name') or '').strip()
-                addr  = (vd.get('address') or '').strip()
-                area  = ((vd.get('area') or {}).get('name') or '').strip()
-                if not is_local(f'{title} {venue} {addr} {area}'): continue
-                artists = [a['name'] for a in (ev_d.get('artists') or []) if a.get('name')]
-                genres  = [g['name'].lower() for g in (ev_d.get('genres') or [])]
-                cat     = 'dj'
-                for g in genres:
-                    for kws, c in CAT_KEYWORDS:
-                        if any(kw in g for kw in c):
-                            cat = kws; break
-                is_free = ev_d.get('isFree') or False
-                tix     = ev_d.get('tickets') or []
-                prices  = [t['salePrice']['value'] for t in tix if t.get('salePrice')]
-                price   = ('Free' if is_free else
-                           f'${min(prices):.0f}–${max(prices):.0f}' if prices else 'Check RA')
-                desc    = clean(ev_d.get('content') or '')[:300]
-                if not desc and artists:
-                    desc = f'Featuring {", ".join(artists)}. At {venue}.'
-                artist_str = ', '.join(artists)
-                display    = f'{venue} – {artist_str}' if artist_str else f'{venue} – {title}'
-                ra_id      = ev_d.get('id','')
-                link       = f'https://ra.co/events/{ra_id}' if ra_id else 'https://ra.co/events/us/nevada'
-                ev = make_ev(scrape_id('ra', listing.get('id','')),
-                    display, cat, d, region, venue, addr,
-                    to_12h(ev_d.get('startTime','')),
-                    price, is_free, desc,
-                    artists[:3] + ['RA'] + (['Dead Ringer'] if 'dead ringer' in venue.lower() else []),
-                    link, 'Resident Advisor (ra.co)')
-                if ev: events.append(ev)
-            if len(listings) < 100 or page*100 >= total: break
-            page += 1
-            time.sleep(1.5)
-        time.sleep(2)
-    print(f'    → {len(events)}', file=sys.stderr)
-    return events
+    # DISABLED 2026-07-01: ra.co now runs bot detection (Cloudflare) that
+    # blocks non-browser requests entirely — confirmed by direct test.
+    # This is new since the scraper was built; the GraphQL endpoint used
+    # to accept plain header-spoofed requests but no longer does. That's
+    # why this was silently returning 0 with no visible error before —
+    # the POST was "succeeding" against a challenge response, not real
+    # data. Skipping cleanly. Re-enabling would require a real browser
+    # session (Playwright), not a plain HTTP request.
+    return []
 
 # ── EVENTBRITE (public search) ────────────────────────────────────────────────
 
 def scrape_eventbrite():
-    print('  Eventbrite…', file=sys.stderr)
-    events = []
-    searches = [
-        ('Reno NV',          'reno'),
-        ('Sparks NV',        'reno'),
-        ('Lake Tahoe CA',    'tahoe'),
-        ('Truckee CA',       'tahoe'),
-        ('South Lake Tahoe', 'tahoe'),
-    ]
-    for location, region in searches:
-        eb_page = 1
-        while eb_page <= 5:  # max 5 pages per location
-            url = (f'https://www.eventbrite.com/api/v3/destination/search/'
-                   f'?start_date.range_start={TODAY}T00%3A00%3A00'
-                   f'&start_date.range_end={UNTIL}T23%3A59%3A59'
-                   f'&location.address={quote(location)}'
-                   f'&location.within=25mi&expand=venue&page_size=50&page={eb_page}')
-            raw = get(url)
-            if not raw: break
-            try: data = json.loads(raw)
-            except: break
-            results = data.get('events',{}).get('results',[])
-            if not results: break
-            for item in results:
-                title = (item.get('name') or '').strip()
-                d     = parse_date((item.get('start') or {}).get('local',''))
-                if not title or not d: continue
-                vd    = item.get('venue') or {}
-                venue = (vd.get('name') or location).strip()
-                addr  = ((vd.get('address') or {}).get('localized_address_display') or '')
-                if not is_local(f'{title} {venue} {addr}'): continue
-                is_free = item.get('is_free', False)
-                desc    = clean((item.get('description') or {}).get('text',''))[:300]
-                ev = make_ev(scrape_id('eb', item.get('id', title+d)),
-                    title, guess_cat(title, desc), d, region,
-                    venue, addr, to_12h((item.get('start') or {}).get('local','')),
-                    'Free' if is_free else None, is_free, desc, [],
-                    item.get('url','https://www.eventbrite.com/'), 'Eventbrite')
-                if ev: events.append(ev)
-                pass
-            if len(results) < 50: break
-            eb_page += 1
-            time.sleep(0.5)
-        time.sleep(1)
-    print(f'    → {len(events)}', file=sys.stderr)
-    return events
+    # DISABLED 2026-07-01: Eventbrite's public "destination search" endpoint
+    # returns 405 Method Not Allowed on every call — they've deprecated
+    # unauthenticated public search. Would need an official Eventbrite API
+    # key + their newer authenticated API to bring this back.
+    return []
 
 # ── TICKETMASTER Discovery API ────────────────────────────────────────────────
 
@@ -918,6 +794,14 @@ def scrape_ticketmaster():
 
 # ── SONGKICK — Reno/Tahoe metro area ──────────────────────────────────────
 def scrape_songkick():
+    # Songkick's metro calendar endpoint returns 401 without a real API key —
+    # the old code used a placeholder string ('not-required-for-basic') that
+    # never actually worked. Reads SONGKICK_API_KEY from GitHub Actions
+    # secrets, same pattern as TM_API_KEY. Skips cleanly if not set.
+    api_key = os.environ.get('SONGKICK_API_KEY', '')
+    if not api_key:
+        print('  Songkick: SONGKICK_API_KEY not set, skipping', file=sys.stderr)
+        return []
     print('  Songkick…', file=sys.stderr)
     # Songkick metro ID for Reno: 13455
     # Lake Tahoe area is covered under Reno metro
@@ -926,7 +810,7 @@ def scrape_songkick():
         page = 1
         while page <= 10:
             url = (f'https://api.songkick.com/api/3.0/metro_areas/{metro_id}/calendar.json'
-                   f'?apikey=not-required-for-basic&min_date={TODAY}&max_date={UNTIL}'
+                   f'?apikey={api_key}&min_date={TODAY}&max_date={UNTIL}'
                    f'&per_page=50&page={page}')
             # Songkick doesn't require API key for basic metro calendar
             raw = get(url)
@@ -1109,7 +993,7 @@ def scrape_reno_aces_v2():
     # MiLB official schedule endpoint
     year = __import__('datetime').date.today().year
     for y in [year, year+1]:
-        url = f'https://bsnv2.mlb.com/api/v1/schedule?sportId=11&teamId=2476&season={y}&gameType=R&hydrate=venue,team'
+        url = f'https://statsapi.mlb.com/api/v1/schedule?sportId=11&teamId=2476&season={y}&gameType=R&hydrate=venue,team'
         raw = get(url)
         if not raw or raw.startswith('ERROR'): continue
         try: data = json.loads(raw)
