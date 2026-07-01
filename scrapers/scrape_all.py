@@ -566,60 +566,68 @@ def scrape_nugget():
     return []
 
 def scrape_atlantis():
+    # FIXED 2026-07-01: site is real and alive with 20+ events, confirmed
+    # via direct fetch. Old regex assumed a div/article wrapper with
+    # "event" in its class name — never verified, never matched. Rewritten
+    # to anchor on the confirmed URL pattern for every event
+    # (/more/events/{category}/{slug}) plus the "Month Day, Year" date
+    # that reliably follows it — same category name always follows the
+    # slash, so this doesn't depend on guessing div/heading structure.
     print('  Atlantis Casino…', file=sys.stderr)
-    raw = get('https://atlantiscasino.com/more/events/')
+    raw = get('https://atlantiscasino.com/more/events')
     if not raw:
         print('    → 0', file=sys.stderr)
         return []
     events = []
     seen = set()
-    blocks = re.findall(r'<(?:div|article)[^>]*event[^>]*>(.*?)</(?:div|article)>',
-                        raw, re.DOTALL)
-    for block in blocks[:200]:
-        t_m = re.search(r'<h[2-4][^>]*>(.*?)</h[2-4]>', block, re.DOTALL)
-        d_m = re.search(r'(\w+ \d{1,2},?\s*\d{4}|\d{4}-\d{2}-\d{2})', block)
-        if not t_m or not d_m: continue
-        title = clean(t_m.group(1))
-        d     = parse_date(d_m.group(1))
-        if not d or title in seen: continue
-        seen.add(title)
-        ev = make_ev(scrape_id('atl2', title+d), title,
+    for m in re.finditer(
+        r'/more/events/(casino-events|dining-events|music-events|spa-events)/([a-z0-9-]+)',
+        raw, re.I):
+        slug = m.group(2)
+        if slug in seen or slug.endswith('-c'): continue  # '-c' suffix = duplicate calendar-grid variant of same event
+        seen.add(slug)
+        # The event's own detail URL appears twice per listing: once as the
+        # title link, once as a "View Details"/"Learn More" CTA link. Both
+        # point to the same href, so collect every <a href="...same slug...">
+        # innerText</a> and keep whichever isn't a generic CTA label.
+        href_frag = f'{m.group(1)}/{slug}'
+        anchor_texts = re.findall(
+            rf'<a[^>]+href="[^"]*{re.escape(href_frag)}"[^>]*>([^<]{{2,90}})</a>',
+            raw, re.I)
+        title = ''
+        for t in anchor_texts:
+            t_clean = clean(t)
+            if t_clean and t_clean.lower() not in ('learn more','view details','buy tickets','details'):
+                title = t_clean
+                break
+        if not title: continue
+        window = raw[m.end():m.end()+300]
+        d_m = re.search(
+            r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s*\d{4}',
+            window)
+        if not d_m: continue
+        d = parse_date(d_m.group(0))
+        if not d: continue
+        link = f'https://atlantiscasino.com/more/events/{href_frag}'
+        ev = make_ev(scrape_id('atl2', slug), title,
                      guess_cat(title), d, 'reno',
-                     'Atlantis Casino Resort', '3800 S Virginia St, Reno',
-                     None, None, False, f'{title} at Atlantis Casino Resort.',
-                     ['Atlantis', 'Reno', 'casino'],
-                     'https://atlantiscasino.com/more/events/', 'Atlantis Casino')
+                     'Atlantis Casino Resort Spa', '3800 S Virginia St, Reno NV',
+                     None, None, False, f'{title} at Atlantis Casino Resort Spa.',
+                     ['Atlantis', 'Reno', 'casino'], link, 'Atlantis Casino')
         if ev: events.append(ev)
     print(f'    → {len(events)}', file=sys.stderr)
     return events
 
 def scrape_peppermill():
-    print('  Peppermill…', file=sys.stderr)
-    raw = get('https://www.peppermillreno.com/entertainment/')
-    if not raw:
-        print('    → 0', file=sys.stderr)
-        return []
-    events = []
-    seen = set()
-    blocks = re.findall(r'<(?:div|article)[^>]*(?:event|show|entertainment)[^>]*>(.*?)</(?:div|article)>',
-                        raw, re.DOTALL)
-    for block in blocks[:200]:
-        t_m = re.search(r'<h[2-4][^>]*>(.*?)</h[2-4]>', block, re.DOTALL)
-        d_m = re.search(r'(\w+ \d{1,2},?\s*\d{4}|\d{4}-\d{2}-\d{2})', block)
-        if not t_m or not d_m: continue
-        title = clean(t_m.group(1))
-        d     = parse_date(d_m.group(1))
-        if not d or title in seen: continue
-        seen.add(title)
-        ev = make_ev(scrape_id('pepp', title+d), title,
-                     guess_cat(title), d, 'reno',
-                     'Peppermill Resort Casino', '2707 S Virginia St, Reno',
-                     None, None, False, f'{title} at Peppermill Resort Casino.',
-                     ['Peppermill', 'Reno', 'casino'],
-                     'https://www.peppermillreno.com/entertainment/', 'Peppermill Resort')
-        if ev: events.append(ev)
-    print(f'    → {len(events)}', file=sys.stderr)
-    return events
+    # DISABLED 2026-07-01: old URL (/entertainment/) was wrong — real page
+    # is /resort/event-list/. But confirmed that page doesn't server-render
+    # events directly; it loads them via a client-side AJAX call to
+    # /library/api/related-events-embed.php?ACTION=RELATED_EVENTS&PAGE_ID=380.
+    # That endpoint might return clean JSON, but I can't verify its actual
+    # response format without live-testing it — not guessing a third format
+    # blind after the Cargo lesson. Worth a manual test of that URL if you
+    # want to revisit this.
+    return []
 
 def scrape_gsr():
     print('  Grand Sierra Resort…', file=sys.stderr)
@@ -666,7 +674,12 @@ def scrape_gsr():
                              ['Grand Sierra','Reno'], url, 'Grand Sierra Resort')
                 if ev: events.append(ev)
         except: continue
-    # Fallback to HTML parsing if JSON-LD found nothing
+    # Fallback to HTML parsing if JSON-LD found nothing (confirmed via direct
+    # fetch: GSR is a HubSpot site with NO JSON-LD event schema — this is the
+    # real path that actually has data. Each event is one big <a> card whose
+    # inner text reads like:
+    # "Tickets & MoreSaturday, Jun 27Stavros HalkiasGrand Theatre | Doors @ 7:00 PMTickets & More"
+    # anchored on the confirmed href pattern /entertainment/concerts-and-shows/{slug}
     if not events:
         raw = get('https://www.grandsierraresort.com/entertainment/concerts-and-shows')
         if not raw:
@@ -674,28 +687,38 @@ def scrape_gsr():
             return []
         events = []
         seen = set()
-        blocks = re.findall(r'<(?:div|article)[^>]*(?:event|show|concert)[^>]*>(.*?)</(?:div|article)>',
-                            raw, re.DOTALL)
-        for block in blocks[:200]:
-            t_m = re.search(r'<h[2-4][^>]*>(.*?)</h[2-4]>', block, re.DOTALL)
-            d_m = re.search(r'(\w+ \d{1,2},?\s*\d{4}|\d{4}-\d{2}-\d{2})', block)
-            if not t_m or not d_m: continue
-            title = clean(t_m.group(1))
-            d     = parse_date(d_m.group(1))
-            if not d or title in seen: continue
-            seen.add(title)
-            l_m = re.search(r'href="(https?://[^"]+grandsierraresort[^"]+)"', block)
-            link = l_m.group(1) if l_m else 'https://www.grandsierraresort.com/entertainment'
-            ev = make_ev(scrape_id('gsr2', title+d), title,
+        card_re = re.compile(
+            r'<a[^>]+href="(https://www\.grandsierraresort\.com/entertainment/concerts-and-shows/([a-z0-9-]+))"[^>]*>(.*?)</a>',
+            re.DOTALL | re.I)
+        for href, slug, inner in card_re.findall(raw):
+            if slug in seen: continue
+            inner_text = clean(re.sub(r'<[^>]+>', ' ', inner))
+            m = re.search(
+                r'(Sun|Mon|Tue|Wed|Thu|Fri|Sat)\w*,?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+(\d{1,2})(.*?)'
+                r'(Grand Theatre|Outdoor Stage)\s*\|?\s*Doors?\s*@\s*(\d{1,2}:\d{2}\s*[AP]M)',
+                inner_text, re.I)
+            if not m: continue
+            seen.add(slug)
+            mon, day = m.group(2), m.group(3)
+            title = clean(m.group(4))
+            venue = m.group(5)
+            doors = m.group(6)
+            if not title or len(title) < 2: continue
+            this_year = date.today().year
+            d = parse_date(f'{mon} {day} {this_year}')
+            if d and d < TODAY:
+                d = parse_date(f'{mon} {day} {this_year + 1}')
+            if not d: continue
+            ev = make_ev(scrape_id('gsr2', slug), title,
                          guess_cat(title), d, 'reno',
-                         'Grand Theatre – Grand Sierra Resort',
-                         '2500 E 2nd St, Reno',
-                         None, '$35–$95', False,
-                         f'{title} live at Grand Sierra Resort.',
-                         ['Grand Sierra', 'Reno'], link, 'Grand Sierra Resort')
+                         f'{venue} – Grand Sierra Resort', '2500 E 2nd St, Reno NV',
+                         doors, None, False, f'{title} at Grand Sierra Resort {venue}.',
+                         ['Grand Sierra','Reno'], href, 'Grand Sierra Resort')
             if ev: events.append(ev)
         print(f'    → {len(events)}', file=sys.stderr)
         return events
+    print(f'    → {len(events)}', file=sys.stderr)
+    return events
 
 
 def scrape_pioneer():
@@ -718,35 +741,26 @@ def scrape_crystal_bay():
     return []
 
 def scrape_bba():
+    # FIXED 2026-07-01: confirmed via direct fetch — bigblueadventure.com
+    # runs the Tribe/WordPress events plugin (meta-tec-api-origin +
+    # webcal ical subscription links both confirm it). The old scraper
+    # never used the proven scrape_tribe() helper at all — it hit a
+    # generic regex against the wrong page. Switched to the same reliable
+    # method already working for Holland Project, Late Nite Productions, etc.
     print('  Big Blue Adventure…', file=sys.stderr)
-    raw = get('https://bigblueadventure.com/events/')
-    if not raw:
-        print('    → 0', file=sys.stderr)
-        return []
-    events = []
-    seen = set()
-    blocks = re.findall(r'<(?:div|article)[^>]*event[^>]*>(.*?)</(?:div|article)>',
-                        raw, re.DOTALL)
-    for block in blocks[:200]:
-        t_m = re.search(r'<h[2-4][^>]*>(.*?)</h[2-4]>', block, re.DOTALL)
-        d_m = re.search(r'(\w+ \d{1,2},?\s*\d{4}|\d{4}-\d{2}-\d{2})', block)
-        if not t_m or not d_m: continue
-        title = clean(t_m.group(1))
-        d     = parse_date(d_m.group(1))
-        if not d or title in seen: continue
-        seen.add(title)
-        cat = ('triathlon' if 'tri' in title.lower() else
-               'swim' if 'swim' in title.lower() else
-               'running' if any(w in title.lower() for w in ['run','marathon','5k']) else
-               'mtb' if 'bike' in title.lower() else 'outdoor')
-        ev = make_ev(scrape_id('bba2', title+d), title, cat, d, 'tahoe',
-                     'Lake Tahoe / Truckee', 'North Lake Tahoe, CA',
-                     None, '$30–$150', False, f'Big Blue Adventure: {title}.',
-                     ['Big Blue Adventure', 'Lake Tahoe', 'outdoor', 'endurance'],
-                     'https://bigblueadventure.com/events/', 'Big Blue Adventure')
-        if ev: events.append(ev)
-    print(f'    → {len(events)}', file=sys.stderr)
-    return events
+    evts = scrape_tribe('https://bigblueadventure.com', 'Big Blue Adventure',
+                        'tahoe', 'Lake Tahoe / Truckee', 'North Lake Tahoe, CA',
+                        extra_tags=['Big Blue Adventure', 'Lake Tahoe', 'outdoor', 'endurance'])
+    # Override category per-event based on title keywords (triathlon/swim/etc)
+    # instead of the generic category scrape_tribe would guess
+    for ev in evts:
+        t = ev['title'].lower()
+        ev['cat'] = ('triathlon' if 'tri' in t else
+                     'swim' if 'swim' in t else
+                     'running' if any(w in t for w in ['run','marathon','5k','10k']) else
+                     'mtb' if 'bike' in t or 'gravel' in t else 'outdoor')
+    print(f'    → {len(evts)}', file=sys.stderr)
+    return evts
 
 def scrape_bartley_ranch():
     # DISABLED 2026-07-01: URL was wrong (facilities/bartley_ranch.php
@@ -760,33 +774,12 @@ def scrape_bartley_ranch():
     return []
 
 def scrape_reno_aces():
-    print('  Reno Aces (MiLB)…', file=sys.stderr)
-    # MiLB has a schedule API
-    raw = get('https://www.milb.com/reno/schedule/full-schedule')
-    if not raw:
-        print('    → 0', file=sys.stderr)
-        return []
-    events = []
-    # Look for game dates in the page
-    games = re.findall(
-        r'"date"\s*:\s*"(\d{4}-\d{2}-\d{2})".*?"opponent"\s*:\s*"([^"]+)"',
-        raw, re.DOTALL)
-    seen = set()
-    for d, opp in games[:50]:
-        if d < TODAY or d > UNTIL: continue
-        if d in seen: continue
-        seen.add(d)
-        title = f'Reno Aces vs {opp}'
-        ev = make_ev(scrape_id('aces2', d + opp), title,
-                     'sports', d, 'reno',
-                     'Greater Nevada Field', '250 Evans Ave, Reno',
-                     '6:35 PM', '$9–$38', False,
-                     f'Reno Aces AAA baseball vs {opp} at Greater Nevada Field.',
-                     ['baseball', 'AAA', 'Reno Aces', 'family'],
-                     'https://www.milb.com/reno/schedule', 'Reno Aces / MiLB')
-        if ev: events.append(ev)
-    print(f'    → {len(events)}', file=sys.stderr)
-    return events
+    # DISABLED 2026-07-01: milb.com is a heavy client-rendered React app —
+    # the game data isn't in the raw server HTML at all (this regex was
+    # matching against nothing that exists in a plain HTTP fetch).
+    # Redundant anyway: scrape_reno_aces_v2() below uses the real official
+    # MLB Stats API directly, which is the correct approach.
+    return []
 
 # ── RESIDENT ADVISOR (GraphQL) ────────────────────────────────────────────────
 
@@ -1026,35 +1019,43 @@ def scrape_washoe_parks():
 
 # ── TAHOE BLUE EVENT CENTER ───────────────────────────────────────────────
 def scrape_tahoe_blue():
-    print('  Tahoe Blue Event Center…', file=sys.stderr)
-    evts = scrape_tribe(
-        'https://www.tahoeblueeventcenter.com', 'Tahoe Blue Event Center',
-        'tahoe', 'Tahoe Blue Event Center', '50 US-50, Stateline, NV',
-        extra_tags=['Tahoe Blue', 'South Lake Tahoe', 'Stateline']
-    )
-    if not evts:
-        raw = get('https://www.tahoeblueeventcenter.com/events/')
-        if raw and not raw.startswith('ERROR'):
-            evts = scrape_html_events(
-                'https://www.tahoeblueeventcenter.com/events/',
-                'Tahoe Blue Event Center', 'tahoe',
-                'Tahoe Blue Event Center', '50 US-50, Stateline, NV',
-                r'<h[2-4][^>]*>(.*?)</h[2-4]>',
-                r'(\w+ \d{1,2},?\s*\d{4}|\d{4}-\d{2}-\d{2})',
-                extra_tags=['Tahoe Blue','South Lake Tahoe']
-            )
-    print(f'    → {len(evts)}', file=sys.stderr)
-    return evts
+    # DISABLED 2026-07-01: not Tribe-based (custom OVG360 ticketing
+    # platform, confirmed via search — not verifiable raw HTML structure
+    # without live testing). Not a real coverage gap though — confirmed
+    # via Ticketmaster search that Tahoe Blue's full roster (Tahoe Knight
+    # Monsters games, Nate Bargatze, Gene Simmons, Yellowcard, etc.) is
+    # already showing up through the working Ticketmaster scraper.
+    return []
 
 
 # ── RENO ACES (MiLB proper schedule API) ─────────────────────────────────
 def scrape_reno_aces_v2():
     print('  Reno Aces (schedule)…', file=sys.stderr)
     events = []
-    # MiLB official schedule endpoint
-    year = __import__('datetime').date.today().year
+    # LIKELY ROOT CAUSE of the 0-result bug, fixed 2026-07-01: the hardcoded
+    # teamId=2476 may not actually be Reno's ID. If it were wrong, the API
+    # call would still succeed (valid JSON for some OTHER team), and the
+    # 'Reno' in home/away name filter below would silently match nothing —
+    # exactly the symptom we saw (0 results, no error). Rather than trust
+    # an unverified number, look up the real ID at runtime from MLB's own
+    # team list and cache it, so this is self-correcting instead of a guess.
+    team_id = None
+    teams_raw = get('https://statsapi.mlb.com/api/v1/teams?sportId=11')
+    if teams_raw and not teams_raw.startswith('ERROR'):
+        try:
+            teams_data = json.loads(teams_raw)
+            for t in teams_data.get('teams', []):
+                name = t.get('name', '')
+                if 'Reno' in name or 'Aces' in name:
+                    team_id = t.get('id')
+                    break
+        except: pass
+    if not team_id:
+        print('    could not find Reno Aces team ID via API lookup, skipping', file=sys.stderr)
+        return []
+    year = date.today().year
     for y in [year, year+1]:
-        url = f'https://statsapi.mlb.com/api/v1/schedule?sportId=11&teamId=2476&season={y}&gameType=R&hydrate=venue,team'
+        url = f'https://statsapi.mlb.com/api/v1/schedule?sportId=11&teamId={team_id}&season={y}&gameType=R&hydrate=venue,team'
         raw = get(url)
         if not raw or raw.startswith('ERROR'): continue
         try: data = json.loads(raw)
