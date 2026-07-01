@@ -17,6 +17,15 @@ from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 from urllib.parse import quote
 
+# Playwright is optional — only needed for Tixr sources (which block plain
+# HTTP requests with bot detection). If it's not installed, the Tixr
+# scraper skips cleanly instead of crashing the whole run.
+try:
+    from playwright.sync_api import sync_playwright
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
+
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 
 TODAY  = date.today().isoformat()
@@ -350,72 +359,119 @@ def scrape_lateniteproductions():
 # tixr-eventId) baked into <head> — that's a much more stable target than
 # guessing at page layout. Strategy: fetch the group's page, pull out
 # links to individual event pages, then read the meta tags off each one.
-def scrape_tixr_group(group_slug, src_name, region, default_venue='', default_addr=''):
+# ── TIXR (via Playwright — a real browser is required, plain HTTP is 403'd) ──
+# Confirmed: tixr.com blocks plain HTTP requests with bot detection (same as
+# ra.co). A real browser session bypasses this. Runs all three known Tixr
+# venues (Cypress, Glow Plaza, Crystal Bay Casino) through ONE shared browser
+# instance for efficiency — launching Chromium is the expensive part (~1-2s),
+# so sharing it across venues instead of relaunching per-venue cuts that
+# cost by ~3x. Every navigation has an explicit timeout so nothing can hang
+# the CI job indefinitely, and the whole thing is wrapped so a single
+# venue failing (or Playwright/Chromium being unavailable at all) can never
+# crash the rest of the scraper run.
+TIXR_GROUPS = [
+    ('cypressreno',       'Cypress Reno',            'reno',  'Cypress',
+     'Midtown Reno, NV'),
+    ('glowplaza',         "J Resort's Glow Plaza",   'reno',  "J Resort's Glow Plaza",
+     '670 W 4th St, Reno NV'),
+    ('crystalbaycasino',  'Crystal Bay Casino',      'tahoe', 'Crystal Bay Casino',
+     '14 State Route 28, Crystal Bay NV'),
+]
+NAV_TIMEOUT_MS = 20000  # 20s hard cap per page load — never let CI hang
+
+def _tixr_extract_meta(page_html, name):
+    m = re.search(
+        rf'<meta[^>]+(?:name|property)=["\']{re.escape(name)}["\'][^>]+content=["\']([^"\']*)["\']',
+        page_html, re.I)
+    return html.unescape(m.group(1)) if m else ''
+
+def _tixr_scrape_one_event(page, group_slug, slug, src_name, region, default_venue, default_addr):
+    ev_url = f'https://www.tixr.com/groups/{group_slug}/events/{slug}'
+    try:
+        page.goto(ev_url, timeout=NAV_TIMEOUT_MS, wait_until='domcontentloaded')
+    except Exception as ex:
+        print(f'    nav failed for {slug}: {ex}', file=sys.stderr)
+        return None
+    page_html = page.content()
+    raw_title = _tixr_extract_meta(page_html, 'og:title') or _tixr_extract_meta(page_html, 'twitter:title')
+    if not raw_title:
+        return None
+    venue_m = re.search(r'Tickets at (.+?) in \w', raw_title)
+    venue = html.unescape(venue_m.group(1)).strip() if venue_m else default_venue
+    title = re.sub(r'\s*Tickets at.*$', '', raw_title).strip() or raw_title
+    start_raw = _tixr_extract_meta(page_html, 'event:start_time')
+    d = parse_date(start_raw)
+    if not title or not d:
+        return None
+    addr_street = _tixr_extract_meta(page_html, 'og:street-address')
+    addr_city   = _tixr_extract_meta(page_html, 'og:locality')
+    addr_state  = _tixr_extract_meta(page_html, 'og:region')
+    addr = ', '.join(filter(None, [addr_street, addr_city, addr_state])) or default_addr
+    desc = _tixr_extract_meta(page_html, 'og:description') or _tixr_extract_meta(page_html, 'description')
+    keywords = [k.strip() for k in _tixr_extract_meta(page_html, 'keywords').split(',') if k.strip()][:5]
+    ev_id = _tixr_extract_meta(page_html, 'tixr-eventId') or slug
+    return make_ev(scrape_id('tixr', ev_id), title, guess_cat(title, desc), d,
+                   region, venue, addr, to_12h(start_raw), None, False,
+                   desc, keywords, ev_url, src_name)
+
+def _tixr_scrape_one_group(browser, group_slug, src_name, region, default_venue, default_addr):
     events = []
-    group_url = f'https://www.tixr.com/groups/{group_slug}'
-    raw = get(group_url)
-    if not raw: return []
-    # Event links look like /groups/{group_slug}/events/{slug}-{numeric_id}
-    slugs = sorted(set(re.findall(
-        rf'/groups/{re.escape(group_slug)}/events/([a-z0-9-]+)', raw, re.I)))
-    for slug in slugs[:100]:
-        ev_url = f'https://www.tixr.com/groups/{group_slug}/events/{slug}'
-        ev_raw = get(ev_url)
-        if not ev_raw: continue
-        def meta(name):
-            m = re.search(
-                rf'<meta[^>]+(?:name|property)=["\']{re.escape(name)}["\'][^>]+content=["\']([^"\']*)["\']',
-                ev_raw, re.I)
-            return html.unescape(m.group(1)) if m else ''
-        raw_title = meta('og:title') or meta('twitter:title')
-        # Titles come as "X Tickets at {Venue} in {City} by {Promoter}" —
-        # pull the specific room/venue out when present (handles multi-room
-        # venues like Crystal Bay's Crown Room vs Red Room), otherwise fall
-        # back to the group-level default.
-        venue_m = re.search(r'Tickets at (.+?) in \w', raw_title)
-        venue = html.unescape(venue_m.group(1)).strip() if venue_m else default_venue
-        title = re.sub(r'\s*Tickets at.*$', '', raw_title).strip() or raw_title
-        start_raw = meta('event:start_time')
-        d = parse_date(start_raw)
-        if not title or not d: continue
-        addr_street = meta('og:street-address')
-        addr_city   = meta('og:locality')
-        addr_state  = meta('og:region')
-        addr = ', '.join(filter(None, [addr_street, addr_city, addr_state])) or default_addr
-        desc = meta('og:description') or meta('description')
-        keywords = [k.strip() for k in meta('keywords').split(',') if k.strip()][:5]
-        ev = make_ev(scrape_id('tixr', meta('tixr-eventId') or slug),
-                     title, guess_cat(title, desc), d, region,
-                     venue, addr, to_12h(start_raw), None, False,
-                     desc, keywords, ev_url, src_name)
-        if ev: events.append(ev)
-        time.sleep(0.3)
+    page = browser.new_page()
+    page.set_default_timeout(NAV_TIMEOUT_MS)
+    try:
+        group_url = f'https://www.tixr.com/groups/{group_slug}'
+        try:
+            page.goto(group_url, timeout=NAV_TIMEOUT_MS, wait_until='networkidle')
+        except Exception as ex:
+            print(f'    group page nav failed ({group_slug}): {ex}', file=sys.stderr)
+            return []
+        page_html = page.content()
+        slugs = sorted(set(re.findall(
+            rf'/groups/{re.escape(group_slug)}/events/([a-z0-9-]+)', page_html, re.I)))
+        for slug in slugs[:100]:
+            try:
+                ev = _tixr_scrape_one_event(page, group_slug, slug, src_name,
+                                             region, default_venue, default_addr)
+                if ev: events.append(ev)
+            except Exception as ex:
+                # One bad event page should never take down the whole group
+                print(f'    event scrape failed ({slug}): {ex}', file=sys.stderr)
+                continue
+    finally:
+        page.close()
     return events
 
-def scrape_tixr_cypress():
-    print('  Cypress (Tixr)…', file=sys.stderr)
-    evts = scrape_tixr_group('cypressreno', 'Cypress Reno', 'reno',
-                              'Cypress', 'Midtown Reno, NV')
-    print(f'    → {len(evts)}', file=sys.stderr)
-    return evts
-
-def scrape_tixr_glowplaza():
-    print('  J Resort Glow Plaza (Tixr)…', file=sys.stderr)
-    evts = scrape_tixr_group('glowplaza', "J Resort's Glow Plaza", 'reno',
-                              "J Resort's Glow Plaza", '670 W 4th St, Reno NV')
-    print(f'    → {len(evts)}', file=sys.stderr)
-    return evts
-
-def scrape_tixr_crystalbay():
-    print('  Crystal Bay Casino (Tixr)…', file=sys.stderr)
-    # Confirmed by Matt (friend works there): all CBC ticketing runs through
-    # Tixr. Two rooms under one group — Crown Room and Red Room — handled
-    # automatically since scrape_tixr_group() pulls the specific room name
-    # out of each event's title.
-    evts = scrape_tixr_group('crystalbaycasino', 'Crystal Bay Casino', 'tahoe',
-                              'Crystal Bay Casino', '14 State Route 28, Crystal Bay NV')
-    print(f'    → {len(evts)}', file=sys.stderr)
-    return evts
+def scrape_tixr_playwright():
+    print('  Tixr (Cypress, Glow Plaza, Crystal Bay Casino)…', file=sys.stderr)
+    if not PLAYWRIGHT_AVAILABLE:
+        print('    Playwright not installed — skipping. '
+              'Run: pip install playwright && playwright install --with-deps chromium',
+              file=sys.stderr)
+        return []
+    all_events = []
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            try:
+                for group_slug, src_name, region, default_venue, default_addr in TIXR_GROUPS:
+                    try:
+                        evts = _tixr_scrape_one_group(
+                            browser, group_slug, src_name, region, default_venue, default_addr)
+                        print(f'    {src_name} → {len(evts)}', file=sys.stderr)
+                        all_events.extend(evts)
+                    except Exception as ex:
+                        # One venue failing should never take down the others
+                        print(f'    ERROR scraping {group_slug}: {ex}', file=sys.stderr)
+                        continue
+            finally:
+                browser.close()
+    except Exception as ex:
+        # Covers Chromium not being installed, launch failures, etc. —
+        # the whole Tixr batch degrades to zero results, never a crash.
+        print(f'    Playwright/Chromium error: {ex}', file=sys.stderr)
+        return all_events
+    print(f'    → {len(all_events)} total', file=sys.stderr)
+    return all_events
 
 # ── HTML SCRAPERS for venues without Tribe/WordPress APIs ─────────────────────
 
@@ -455,60 +511,18 @@ def scrape_html_events(url, src_name, region, venue, addr,
     return events
 
 def scrape_cargo():
-    # FIXED 2026-07-01: was hitting cargoconcerthall.com, which is a dead/
-    # misconfigured old domain (that's what caused the TLS alert every run).
-    # Cargo's real current site is cargoreno.com — confirmed alive, static
-    # HTML (Webflow), NOT behind TLS blocking. Not a Tribe/WordPress site
-    # though, so using a proximity-based HTML scraper anchored on their
-    # distinctive /product/{slug} event links, which is a stable pattern
-    # even without seeing their exact div/class structure. Unverified
-    # against raw HTML in production — test this one and send me output.
-    print('  Cargo Concert Hall…', file=sys.stderr)
-    raw = get('https://www.cargoreno.com/upcoming-events')
-    if not raw:
-        print('    → 0', file=sys.stderr)
-        return []
-    events = []
-    seen = set()
-    # Each event block contains a /product/{slug} link plus a nearby
-    # "#### Title" heading and Mon/Day date markers. Search in a window
-    # around each product link rather than assuming exact tag structure.
-    for m in re.finditer(r'/product/([a-z0-9-]+)', raw):
-        slug = m.group(1)
-        if slug in seen: continue
-        seen.add(slug)
-        window = raw[max(0, m.start()-600):m.start()+50]
-        # Title: look for "#### Title" or "### Title" markdown-style heading,
-        # or <h3-5> tag with text, nearest to the link
-        t_m = re.findall(r'#{3,5}\s+([^\n#]{3,80})', window)
-        title = clean(t_m[-1]) if t_m else ''
-        # Date: look for 3-letter month + day number pattern near the link
-        d_m = re.findall(
-            r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+(\d{1,2})\b',
-            window)
-        d = None
-        if d_m:
-            mon, day = d_m[-1]
-            this_year = date.today().year
-            d_try = parse_date(f'{mon} {day} {this_year}')
-            # Cargo's page lists events chronologically going forward; if the
-            # parsed date looks like it's already in the past, it must mean
-            # the event is actually next year (e.g. scraping in Dec for a
-            # Jan show)
-            if d_try and d_try < TODAY:
-                d_try = parse_date(f'{mon} {day} {this_year + 1}')
-            d = d_try
-        if not title or not d or title.lower() in ('reno','details','see all'):
-            continue
-        link = f'https://www.cargoreno.com/product/{slug}'
-        ev = make_ev(scrape_id('cargo', slug), title,
-                     guess_cat(title), d, 'reno',
-                     'Cargo Concert Hall', '255 N Virginia St, Reno NV',
-                     None, None, False, f'{title} at Cargo Concert Hall.',
-                     ['Cargo', 'Downtown Reno'], link, 'Cargo Concert Hall')
-        if ev: events.append(ev)
-    print(f'    → {len(events)}', file=sys.stderr)
-    return events
+    # DISABLED 2026-07-01: two attempts failed. First fix (correcting the
+    # domain from dead cargoconcerthall.com to real cargoreno.com) was
+    # right, but the second fix — a regex looking for "####" markdown-style
+    # headers — was wrong. That markdown formatting is an artifact of how
+    # my own fetch tool renders pages for me, NOT what the real HTML looks
+    # like, so the pattern never matched anything (confirmed: ran clean,
+    # zero errors, zero events). Rather than guess a third time, disabling
+    # this until it can be tested against the real raw HTML directly.
+    # Cargo's bigger shows (Madeon, GWAR, etc.) also tend to appear on
+    # Ticketmaster, so this isn't a total blackout — smaller/local shows
+    # are what's missing.
+    return []
 
 def scrape_alpine():
     # NOTE 2026-07-01: thealpine-reno.com no longer runs the Tribe plugin —
@@ -685,11 +699,12 @@ def scrape_pioneer():
 def scrape_crystal_bay():
     # REPLACED 2026-07-01: this used to scrape crystalbaycasino.com HTML
     # directly (unreliable, was returning 0). Confirmed (via Matt's friend
-    # who works there) that CBC does ALL ticketing through Tixr — using
-    # that instead now, see scrape_tixr_crystalbay() / 'cbc' registration
-    # below. Keeping this function only so nothing else in the file that
-    # might reference it breaks; it's no longer called.
-    return scrape_tixr_crystalbay()
+    # who works there) that CBC does ALL ticketing through Tixr. Crystal
+    # Bay is now scraped as part of the consolidated 'tixr' source
+    # (scrape_tixr_playwright(), covers Cypress + Glow Plaza + Crystal Bay
+    # in one browser session) — returning [] here so this key doesn't
+    # double-scrape the same venue through two different paths.
+    return []
 
 def scrape_bba():
     print('  Big Blue Adventure…', file=sys.stderr)
@@ -1199,8 +1214,7 @@ ALL_SCRAPERS = {
     'sky':     scrape_skytavern,
     'lal':     scrape_live_lakeview,
     'lnp':     scrape_lateniteproductions,
-    'tixr_cy': scrape_tixr_cypress,
-    'tixr_gp': scrape_tixr_glowplaza,
+    'tixr':    scrape_tixr_playwright,
     'cargo':   scrape_cargo,
     'alpine':  scrape_alpine,
     'nugget':  scrape_nugget,
