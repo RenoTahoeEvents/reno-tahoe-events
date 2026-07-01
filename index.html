@@ -385,7 +385,7 @@ function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').
 
 let SEED=[], events=[];
 let Cat='all',View='month',Reg='all',Dark=true,Ven='all',Zoom=1;
-let calY=2026,calM=5,calDay=TD(),ws=gws(new Date()),SQ='';
+let calY=new Date().getFullYear(),calM=new Date().getMonth(),calDay=TD(),ws=gws(new Date()),SQ='';
 let tipTimer=null,tipEl=null;
 
 function ls(k){try{return localStorage.getItem(k);}catch(x){return null;}}
