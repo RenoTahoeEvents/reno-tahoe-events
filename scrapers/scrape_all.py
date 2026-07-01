@@ -426,8 +426,37 @@ def _tixr_scrape_one_group(browser, group_slug, src_name, region, default_venue,
             print(f'    group page nav failed ({group_slug}): {ex}', file=sys.stderr)
             return []
         page_html = page.content()
-        slugs = sorted(set(re.findall(
-            rf'/groups/{re.escape(group_slug)}/events/([a-z0-9-]+)', page_html, re.I)))
+        # Diagnostics — so a zero-result run tells us WHY, not just "0"
+        html_len = len(page_html)
+        challenge_markers = ['Just a moment', 'cf-browser-verification',
+                              'Checking your browser', 'Attention Required',
+                              'captcha', 'cf-challenge']
+        hit_challenge = [m for m in challenge_markers if m.lower() in page_html.lower()]
+        if hit_challenge:
+            print(f'    ⚠ {group_slug}: possible bot-challenge page detected '
+                  f'(markers: {hit_challenge}), html_len={html_len}', file=sys.stderr)
+        # Primary method: query real DOM anchor elements (most reliable —
+        # doesn't depend on guessing how the page's JS framework formats
+        # raw HTML, works regardless of rendering quirks)
+        try:
+            hrefs = page.eval_on_selector_all(
+                'a[href*="/events/"]', 'els => els.map(e => e.getAttribute("href"))')
+        except Exception as ex:
+            print(f'    DOM query failed ({group_slug}): {ex}', file=sys.stderr)
+            hrefs = []
+        slugs = set()
+        for href in (hrefs or []):
+            m = re.search(rf'/groups/{re.escape(group_slug)}/events/([a-z0-9-]+)', href or '', re.I)
+            if m: slugs.add(m.group(1))
+        # Fallback: regex on raw page HTML, in case links exist as plain
+        # text/data attributes rather than real <a href> DOM elements
+        if not slugs:
+            slugs = set(re.findall(
+                rf'/groups/{re.escape(group_slug)}/events/([a-z0-9-]+)', page_html, re.I))
+        slugs = sorted(slugs)
+        no_shows = 'no upcoming shows' in page_html.lower()
+        print(f'    {group_slug}: html_len={html_len}, dom_links={len(hrefs or [])}, '
+              f'slugs_found={len(slugs)}, "no upcoming shows" text={no_shows}', file=sys.stderr)
         for slug in slugs[:100]:
             try:
                 ev = _tixr_scrape_one_event(page, group_slug, slug, src_name,
