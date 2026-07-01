@@ -471,36 +471,18 @@ def _tixr_scrape_one_group(browser, group_slug, src_name, region, default_venue,
     return events
 
 def scrape_tixr_playwright():
-    print('  Tixr (Cypress, Glow Plaza, Crystal Bay Casino)…', file=sys.stderr)
-    if not PLAYWRIGHT_AVAILABLE:
-        print('    Playwright not installed — skipping. '
-              'Run: pip install playwright && playwright install --with-deps chromium',
-              file=sys.stderr)
-        return []
-    all_events = []
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            try:
-                for group_slug, src_name, region, default_venue, default_addr in TIXR_GROUPS:
-                    try:
-                        evts = _tixr_scrape_one_group(
-                            browser, group_slug, src_name, region, default_venue, default_addr)
-                        print(f'    {src_name} → {len(evts)}', file=sys.stderr)
-                        all_events.extend(evts)
-                    except Exception as ex:
-                        # One venue failing should never take down the others
-                        print(f'    ERROR scraping {group_slug}: {ex}', file=sys.stderr)
-                        continue
-            finally:
-                browser.close()
-    except Exception as ex:
-        # Covers Chromium not being installed, launch failures, etc. —
-        # the whole Tixr batch degrades to zero results, never a crash.
-        print(f'    Playwright/Chromium error: {ex}', file=sys.stderr)
-        return all_events
-    print(f'    → {len(all_events)} total', file=sys.stderr)
-    return all_events
+    # DISABLED 2026-07-01: CONFIRMED via diagnostic run — tixr.com serves a
+    # genuine bot-challenge/CAPTCHA page (html_len~1480, "captcha" marker
+    # present) to the automated browser instead of real content, on all
+    # three venues. This is deliberate, active anti-bot protection, not a
+    # code bug. Not attempting to defeat it — that crosses from scraping a
+    # public page into circumventing a site's active security measures,
+    # which isn't something to build regardless of the reason. Tixr data
+    # (Cypress, Glow Plaza, Crystal Bay Casino) isn't gettable through
+    # automated scraping. Real alternative: check those venues' Tixr pages
+    # manually/periodically, or see if any of them will share a direct
+    # iCal/RSS feed on request.
+    return []
 
 # ── HTML SCRAPERS for venues without Tribe/WordPress APIs ─────────────────────
 
