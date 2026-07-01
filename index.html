@@ -276,7 +276,7 @@ body.light .ev-link{color:#007aff}
   /* Hide the zoom control entirely (zoom is locked at 80% via JS on mobile) */
   #zoomCtrl{display:none}
 
-  /* "Choose A Day" hint centered in each empty month cell */
+  /* "See Today's Events" hint centered in each empty month cell */
   .dcell{position:relative}
   .mo-hint{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
     color:#8e8e93;font-size:11px;font-weight:500;text-align:center;width:100%;
@@ -683,7 +683,7 @@ function rMonth(){
     // On mobile, month cells show ONLY the day number — no event chips.
     // Tapping any cell navigates straight to Day view instead (see attachMon()).
     // Desktop path is completely unaffected by this guard.
-    const chipsHtml=IS_MOBILE?'<span class="mo-hint">Choose A Day</span>':devs.map(ev=>{const c=CM[ev.cat]||CM.community;return`<div class="chip" style="border-left-color:${c.dot}" data-eid="${ev.id}">${esc(ev.title)}</div>`;}).join('');
+    const chipsHtml=IS_MOBILE?'<span class="mo-hint">See Today\'s Events</span>':devs.map(ev=>{const c=CM[ev.cat]||CM.community;return`<div class="chip" style="border-left-color:${c.dot}" data-eid="${ev.id}">${esc(ev.title)}</div>`;}).join('');
     h+=`<div class="dcell${isT?' today':''}" data-cd="${d}" data-total="${devs.length}">
       <span class="dnum">${d}</span>
       ${chipsHtml}
