@@ -260,6 +260,31 @@ body.light .srch-btn{background:#007aff}
 body.light .card-foot{border-top:1px solid #e5e5ea}
 .ev-link{font-size:13px;color:#0a84ff}
 body.light .ev-link{color:#007aff}
+
+/* ── MOBILE (≤680px) ──────────────────────────────────────────────────
+   Everything in this block only applies below 680px. Desktop styles
+   above are completely untouched. */
+#catsel-mobile{display:none}
+@media (max-width:680px){
+  /* Pills → dropdown */
+  .pills{display:none}
+  #catsel-mobile{display:block}
+
+  /* Hide the week-view toggle button only (Month/Day stay visible) */
+  .vseg .sb[data-v="week"]{display:none}
+
+  /* Hide the zoom control entirely (zoom is locked at 80% via JS on mobile) */
+  #zoomCtrl{display:none}
+
+  /* Bigger, more readable text */
+  body{font-size:16px}
+  .drow-title{font-size:17px}
+  .drow-sub{font-size:14px}
+  .drow-time{font-size:14px}
+  .dnum{font-size:15px}
+  .cal-title{font-size:17px}
+  .dow{font-size:14px}
+}
 </style>
 </head>
 <body>
@@ -274,7 +299,7 @@ body.light .ev-link{color:#007aff}
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;flex-shrink:0;"><circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="22"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="2" y1="12" x2="4" y2="12"/><line x1="20" y1="12" x2="22" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
       <span id="dlbl">Dark</span>
     </button>
-    <div class="mode-btn" style="gap:2px;padding:3px;cursor:default" title="Text size">
+    <div class="mode-btn" id="zoomCtrl" style="gap:2px;padding:3px;cursor:default" title="Text size">
       <button onclick="zoomOut()" title="Smaller text" aria-label="Smaller text" style="display:flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:6px;background:#48484a">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>
       </button>
@@ -319,6 +344,7 @@ body.light .ev-link{color:#007aff}
     <span class="ev-cnt" id="ev-cnt"></span>
   </div>
   <div class="pills" id="pills"></div>
+  <select id="catsel-mobile" onchange="setCat(this.value)" style="width:100%;margin-bottom:6px"></select>
   <div class="main" id="main"><div style="display:flex;align-items:center;justify-content:center;height:100%;color:#636366;font-size:16px">Loading events…</div></div>
 </div>
 </div>
@@ -362,6 +388,7 @@ const CATS_DEF=[
 const CM={};CATS_DEF.forEach(c=>CM[c.id]=c);
 (function(){
   const container=document.getElementById('pills');
+  const mobileSel=document.getElementById('catsel-mobile');
   CATS_DEF.forEach(c=>{
     const b=document.createElement('button');
     b.className='pill'+(c.id==='all'?' on':'');
@@ -369,6 +396,11 @@ const CM={};CATS_DEF.forEach(c=>CM[c.id]=c);
     b.textContent=c.l;
     b.onclick=function(){setCat(this.dataset.c);};
     container.appendChild(b);
+    if(mobileSel){
+      const o=document.createElement('option');
+      o.value=c.id;o.textContent=c.l;
+      mobileSel.appendChild(o);
+    }
   });
 })();
 </script>
@@ -387,6 +419,7 @@ let SEED=[], events=[];
 let Cat='all',View='month',Reg='all',Dark=true,Ven='all',Zoom=1;
 let calY=new Date().getFullYear(),calM=new Date().getMonth(),calDay=TD(),ws=gws(new Date()),SQ='';
 let tipTimer=null,tipEl=null;
+const IS_MOBILE=window.matchMedia('(max-width:680px)').matches;
 
 function ls(k){try{return localStorage.getItem(k);}catch(x){return null;}}
 function lw(k,v){try{localStorage.setItem(k,v);}catch(x){}}
@@ -396,10 +429,23 @@ function boot(){
   if(s){try{JSON.parse(s).forEach(ev=>{if(!events.find(x=>x.id===ev.id))events.push(ev);});}catch(x){}}
   const dm=ls('rth_dark');
   if(dm==='0'){Dark=false;applyDark();}
-  const zm=ls('rth_zoom');
-  if(zm){const zf=parseFloat(zm);if(zf>=0.8&&zf<=1.4)Zoom=zf;}
+  // Zoom is locked at 80% on mobile (control is hidden there) — ignore any
+  // stored desktop zoom preference in that case
+  if(IS_MOBILE){
+    Zoom=0.8;
+  }else{
+    const zm=ls('rth_zoom');
+    if(zm){const zf=parseFloat(zm);if(zf>=0.8&&zf<=1.4)Zoom=zf;}
+  }
   applyZoom();
   tipEl=document.getElementById('tip');
+  // Mobile defaults to Day view (Week toggle is hidden on mobile entirely).
+  // This runs BEFORE the shared-link restore below, so a shared link like
+  // ?view=month still correctly overrides this default.
+  if(IS_MOBILE){
+    View='day';
+    document.querySelectorAll('.vseg .sb').forEach(b=>b.classList.toggle('on',b.dataset.v==='day'));
+  }
   // Support shared links: ?view=day&date=YYYY-MM-DD | ?view=week&date=YYYY-MM-DD | ?view=month&y=2026&m=6
   try{
     const params=new URLSearchParams(window.location.search);
@@ -434,6 +480,8 @@ function boot(){
     if(sharedCat){
       Cat=sharedCat;
       document.querySelectorAll('.pill').forEach(p=>p.classList.toggle('on',p.dataset.c===sharedCat));
+      const mobileSel=document.getElementById('catsel-mobile');
+      if(mobileSel)mobileSel.value=sharedCat;
     }
     if(sharedQ){
       SQ=sharedQ;
@@ -498,6 +546,8 @@ function setCat(id){
   if(Cat===id && id!=='all') id='all';
   Cat=id;
   document.querySelectorAll('.pill').forEach(p=>p.classList.toggle('on',p.dataset.c===id));
+  const mobileSel=document.getElementById('catsel-mobile');
+  if(mobileSel)mobileSel.value=id;
   buildMoSel();buildVenueSel();render();
 }
 
@@ -624,10 +674,13 @@ function rMonth(){
     const ds=`${calY}-${String(calM+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
     const isT=ds===ts;
     const devs=byDay[d]||[];
-    // We'll render ALL chips but hide overflowing ones via JS after layout
+    // On mobile, month cells show ONLY the day number — no event chips.
+    // Tapping any cell navigates straight to Day view instead (see attachMon()).
+    // Desktop path is completely unaffected by this guard.
+    const chipsHtml=IS_MOBILE?'':devs.map(ev=>{const c=CM[ev.cat]||CM.community;return`<div class="chip" style="border-left-color:${c.dot}" data-eid="${ev.id}">${esc(ev.title)}</div>`;}).join('');
     h+=`<div class="dcell${isT?' today':''}" data-cd="${d}" data-total="${devs.length}">
       <span class="dnum">${d}</span>
-      ${devs.map(ev=>{const c=CM[ev.cat]||CM.community;return`<div class="chip" style="border-left-color:${c.dot}" data-eid="${ev.id}">${esc(ev.title)}</div>`;}).join('')}
+      ${chipsHtml}
     </div>`;
   }
   const rem=(7-((fd+days)%7))%7;
@@ -757,12 +810,21 @@ function attachMon(){
     }
   });
 
-  // ── Cell click for multi-event list ──
+  // ── Cell click for multi-event list (desktop) / navigate to Day view (mobile) ──
   document.querySelectorAll('.dcell:not(.ec)').forEach(cell=>{
     cell.addEventListener('click',function(ev){
       if(ev.target.dataset.eid||ev.target.classList.contains('more-badge'))return;
       const d=parseInt(this.dataset.cd);
       const ds=`${calY}-${String(calM+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      if(IS_MOBILE){
+        // Mobile: any tap (even on a day with zero events) goes straight
+        // to full Day view for that date.
+        calDay=ds;
+        View='day';
+        document.querySelectorAll('.vseg .sb').forEach(b=>b.classList.toggle('on',b.dataset.v==='day'));
+        render();
+        return;
+      }
       const devs=getF().filter(ev2=>{const s=dt(ev2.date),en=ev2.end?dt(ev2.end):s,t=dt(ds);return t>=s&&t<=en;});
       if(!devs.length)return;
       if(devs.length===1){openDet(devs[0].id);return;}
