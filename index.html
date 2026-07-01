@@ -407,6 +407,11 @@ function boot(){
     const sharedView=params.get('view');
     const sharedY=params.get('y');
     const sharedM=params.get('m');
+    const sharedReg=params.get('reg');
+    const sharedCat=params.get('cat');
+    const sharedVen=params.get('ven');
+    const sharedQ=params.get('q');
+    const sharedSrt=params.get('srt');
     if(sharedDate&&/^\d{4}-\d{2}-\d{2}$/.test(sharedDate)){
       calDay=sharedDate;
       const d=dt(sharedDate);
@@ -420,8 +425,35 @@ function boot(){
       View=sharedView;
       document.querySelectorAll('.vseg .sb').forEach(b=>b.classList.toggle('on',b.dataset.v===sharedView));
     }
+    // Restore region/category/search BEFORE building the venue dropdown,
+    // since the venue list depends on which region/category/search is active
+    if(sharedReg){
+      Reg=sharedReg;
+      document.querySelectorAll('.rseg .sb').forEach(b=>b.classList.toggle('on',b.dataset.r===sharedReg));
+    }
+    if(sharedCat){
+      Cat=sharedCat;
+      document.querySelectorAll('.pill').forEach(p=>p.classList.toggle('on',p.dataset.c===sharedCat));
+    }
+    if(sharedQ){
+      SQ=sharedQ;
+      const srch=document.getElementById('srch');
+      if(srch)srch.value=sharedQ;
+    }
+    // Ven is applied after buildVenueSel() runs (it reads the Ven variable
+    // to mark the matching <option> as selected)
+    if(sharedVen)Ven=sharedVen;
   }catch(x){}
   buildMoSel();buildVenueSel();render();
+  // Sort dropdown has no JS state var — set it directly on the DOM after render
+  try{
+    const params=new URLSearchParams(window.location.search);
+    const sharedSrt=params.get('srt');
+    if(sharedSrt){
+      const sel=document.getElementById('srtsel');
+      if(sel){sel.value=sharedSrt;render();}
+    }
+  }catch(x){}
 }
 
 function applyZoom(){
@@ -947,8 +979,19 @@ function rDay(){
 }
 function dayNav(dir){const d=dt(calDay);d.setDate(d.getDate()+dir);calDay=iso(d);render();}
 
+// Adds current filter state (region, category, venue, search, sort) to any share URL
+function addFilterParams(url){
+  if(Reg!=='all')url.searchParams.set('reg',Reg); else url.searchParams.delete('reg');
+  if(Cat!=='all')url.searchParams.set('cat',Cat); else url.searchParams.delete('cat');
+  if(Ven!=='all')url.searchParams.set('ven',Ven); else url.searchParams.delete('ven');
+  if(SQ)url.searchParams.set('q',SQ); else url.searchParams.delete('q');
+  const srt=(document.getElementById('srtsel')||{}).value;
+  if(srt&&srt!=='date')url.searchParams.set('srt',srt); else url.searchParams.delete('srt');
+  return url;
+}
+
 function shareDay(){
-  const url=new URL(window.location.href);
+  const url=addFilterParams(new URL(window.location.href));
   url.searchParams.set('view','day');
   url.searchParams.set('date',calDay);
   const shareUrl=url.toString();
@@ -995,7 +1038,7 @@ function openList(title,devs,dateStr){
 }
 
 function shareMonth(){
-  const url=new URL(window.location.href);
+  const url=addFilterParams(new URL(window.location.href));
   url.searchParams.set('view','month');
   url.searchParams.set('y',calY);
   url.searchParams.set('m',calM);
@@ -1014,7 +1057,7 @@ function shareMonth(){
 }
 
 function shareWeek(){
-  const url=new URL(window.location.href);
+  const url=addFilterParams(new URL(window.location.href));
   url.searchParams.set('view','week');
   url.searchParams.set('date',iso(ws));
   const shareUrl=url.toString();
@@ -1032,7 +1075,7 @@ function shareWeek(){
 }
 
 function shareDayDate(dateStr){
-  const url=new URL(window.location.href);
+  const url=addFilterParams(new URL(window.location.href));
   url.searchParams.set('view','day');
   url.searchParams.set('date',dateStr);
   const shareUrl=url.toString();
