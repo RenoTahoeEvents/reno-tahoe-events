@@ -580,12 +580,16 @@ def scrape_atlantis():
         return []
     events = []
     seen = set()
+    total_slugs = 0
+    no_title = 0
+    no_date = 0
     for m in re.finditer(
         r'/more/events/(casino-events|dining-events|music-events|spa-events)/([a-z0-9-]+)',
         raw, re.I):
         slug = m.group(2)
         if slug in seen or slug.endswith('-c'): continue  # '-c' suffix = duplicate calendar-grid variant of same event
         seen.add(slug)
+        total_slugs += 1
         # The event's own detail URL appears twice per listing: once as the
         # title link, once as a "View Details"/"Learn More" CTA link. Both
         # point to the same href, so collect every <a href="...same slug...">
@@ -600,14 +604,20 @@ def scrape_atlantis():
             if t_clean and t_clean.lower() not in ('learn more','view details','buy tickets','details'):
                 title = t_clean
                 break
-        if not title: continue
+        if not title:
+            no_title += 1
+            continue
         window = raw[m.end():m.end()+300]
         d_m = re.search(
             r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s*\d{4}',
             window)
-        if not d_m: continue
+        if not d_m:
+            no_date += 1
+            continue
         d = parse_date(d_m.group(0))
-        if not d: continue
+        if not d:
+            no_date += 1
+            continue
         link = f'https://atlantiscasino.com/more/events/{href_frag}'
         ev = make_ev(scrape_id('atl2', slug), title,
                      guess_cat(title), d, 'reno',
@@ -615,6 +625,8 @@ def scrape_atlantis():
                      None, None, False, f'{title} at Atlantis Casino Resort Spa.',
                      ['Atlantis', 'Reno', 'casino'], link, 'Atlantis Casino')
         if ev: events.append(ev)
+    print(f'    html_len={len(raw)}, unique_slugs_found={total_slugs}, '
+          f'failed_no_title={no_title}, failed_no_date={no_date}', file=sys.stderr)
     print(f'    → {len(events)}', file=sys.stderr)
     return events
 
@@ -690,14 +702,18 @@ def scrape_gsr():
         card_re = re.compile(
             r'<a[^>]+href="(https://www\.grandsierraresort\.com/entertainment/concerts-and-shows/([a-z0-9-]+))"[^>]*>(.*?)</a>',
             re.DOTALL | re.I)
-        for href, slug, inner in card_re.findall(raw):
+        cards_found = card_re.findall(raw)
+        no_pattern_match = 0
+        for href, slug, inner in cards_found:
             if slug in seen: continue
             inner_text = clean(re.sub(r'<[^>]+>', ' ', inner))
             m = re.search(
                 r'(Sun|Mon|Tue|Wed|Thu|Fri|Sat)\w*,?\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+(\d{1,2})(.*?)'
                 r'(Grand Theatre|Outdoor Stage)\s*\|?\s*Doors?\s*@\s*(\d{1,2}:\d{2}\s*[AP]M)',
                 inner_text, re.I)
-            if not m: continue
+            if not m:
+                no_pattern_match += 1
+                continue
             seen.add(slug)
             mon, day = m.group(2), m.group(3)
             title = clean(m.group(4))
@@ -715,6 +731,10 @@ def scrape_gsr():
                          doors, None, False, f'{title} at Grand Sierra Resort {venue}.',
                          ['Grand Sierra','Reno'], href, 'Grand Sierra Resort')
             if ev: events.append(ev)
+        sample_text = clean(re.sub(r'<[^>]+>', ' ', cards_found[0][2]))[:150] if cards_found else '(no cards matched at all)'
+        print(f'    html_len={len(raw)}, cards_found={len(cards_found)}, '
+              f'pattern_mismatch={no_pattern_match}, sample_inner_text={sample_text!r}',
+              file=sys.stderr)
         print(f'    → {len(events)}', file=sys.stderr)
         return events
     print(f'    → {len(events)}', file=sys.stderr)
