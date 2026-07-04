@@ -240,7 +240,11 @@ def scrape_tribe(base_url, src_name, region, default_venue='', default_addr='',
         total_html_len += len(raw)
         try: data = json.loads(raw)
         except Exception as ex:
-            last_error = f'JSON parse failed on page {page}: {ex}'
+            # Show the actual content on failure — a tiny response here is
+            # usually a security plugin/firewall blocking repeated
+            # automated requests (WAF, Wordfence, Cloudflare rate-limit),
+            # not a transient blip. Seeing the real text beats guessing.
+            last_error = f'JSON parse failed on page {page}: {ex}, raw content: {raw[:200]!r}'
             break
         # Defensive: some sites return a bare JSON array instead of
         # {"events": [...]}, or an error object with no "events" key at all.
@@ -450,14 +454,24 @@ def scrape_skytavern():
         if not title_m: continue
         title = clean(title_m.group(1))
         if not title: continue
-        after_text = raw[m.end():m.end()+600]
-        date_m = re.search(r'dates=(\d{8})T(\d{6})Z', after_text)
-        if not date_m:
+        # DIAGNOSED 2026-07-04: same root cause as Atlantis — this href
+        # appears more than once per event (image-wrapper link before the
+        # title, title link itself, "View Event" link after). Taking only
+        # the first occurrence's forward window sometimes missed the
+        # Google Calendar link entirely. Fixed by trying every occurrence.
+        d = None
+        for occ in re.finditer(re.escape(f'/sky-tavern-calendar/{slug}'), raw):
+            window = raw[occ.end():occ.end()+800]
+            date_m = re.search(r'dates=(\d{8})T(\d{6})Z', window)
+            if date_m:
+                date_part = date_m.group(1)
+                d_candidate = f'{date_part[0:4]}-{date_part[4:6]}-{date_part[6:8]}'
+                if parse_date(d_candidate):
+                    d = d_candidate
+                    break
+        if not d:
             no_date_found += 1
             continue
-        date_part = date_m.group(1)  # YYYYMMDD
-        d = f'{date_part[0:4]}-{date_part[4:6]}-{date_part[6:8]}'
-        if not parse_date(d): continue
         link = f'https://www.skytavern.org/sky-tavern-calendar/{slug}'
         ev = make_ev(scrape_id('sky', slug), title,
                      guess_cat(title, 'mountain bike'), d, 'reno',
@@ -478,19 +492,30 @@ def scrape_live_lakeview():
     # Not a real coverage gap.
     return []
 
-def scrape_alibi():
-    # BUILT 2026-07-01: confirmed real, live events calendar covering TWO
-    # venues (Incline Village + Truckee) — recurring URL pattern
-    # /events/{slug}-YYYY-MM-DD/ and List/Grid/Calendar view toggle match
-    # The Events Calendar (Tribe) plugin exactly. Trying the proven Tribe
-    # REST API first, same as Holland Project/BBA/etc.
-    print('  Alibi Ale Works…', file=sys.stderr)
-    evts = scrape_tribe('https://alibialeworks.com', 'Alibi Ale Works',
-                        'tahoe', '', '',
-                        extra_tags=['Alibi', 'brewery', 'Truckee', 'Incline Village'],
+def scrape_reno_improv():
+    # BUILT 2026-07-01: confirmed real, live Tribe/WordPress events calendar
+    # (meta-tec-api-origin confirmed) — real dated shows with descriptions,
+    # prices, ticket links. Covers both "Reno Improv" branded shows and
+    # "The Foundry" (their experimental-format venue, same address/site).
+    print('  Reno Improv / The Foundry…', file=sys.stderr)
+    evts = scrape_tribe('https://renoimprov.org', 'Reno Improv',
+                        'reno', 'Reno Improv', '695 Willow St, Reno, NV',
+                        extra_tags=['improv', 'comedy', 'The Foundry'],
                         max_pages=10)
     print(f'    → {len(evts)}', file=sys.stderr)
     return evts
+
+def scrape_alibi():
+    # DISABLED 2026-07-04: my confident guess was wrong. The REST API
+    # (wp-json/tribe/events/v1/events) returns a confirmed 404, even
+    # though the front-end /events/ page is real and shows genuine dated
+    # events with the Tribe visual style. Some sites run the plugin's
+    # front-end templates but disable the REST API for security — that
+    # appears to be the case here. This needs an HTML-based scraper
+    # (like Sky Tavern/Reno Scene got), not the Tribe API, but I'm not
+    # guessing a second structure for the same venue in one night.
+    # Real, alive, worth a proper look next sweep — not a dead end.
+    return []
 
 def scrape_lateniteproductions():
     print('  Late Nite Productions…', file=sys.stderr)
@@ -775,28 +800,29 @@ def scrape_atlantis():
         if not title:
             no_title += 1
             continue
-        # DIAGNOSED 2026-07-01 from live run: 300 chars was too narrow — real
-        # HTML has far more attribute/class/icon markup between elements
-        # than the cleaned text suggested. Widened based on evidence, not
-        # a guess. Kept forward-only (not backward) since the date was
-        # confirmed to appear AFTER the title link, and searching backward
-        # risks grabbing a neighboring event's date instead of this one's.
-        window = raw[m.end():m.end()+800]
-        d_m = re.search(
-            r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s*\d{4}',
-            window)
-        if not d_m:
-            no_date += 1
-            if no_date <= 2:
-                # Same technique that found the real GSR bug: stop guessing,
-                # print the actual raw text so next run shows the real
-                # structure instead of another blind window-size guess.
-                sample = clean(re.sub(r'<[^>]+>', ' ', window))[:250]
-                print(f'    [Atlantis] no-date sample ({slug}): {sample!r}', file=sys.stderr)
-            continue
-        d = parse_date(d_m.group(0))
+        # DIAGNOSED 2026-07-04 from live run: the real bug wasn't window
+        # size — it's that this href appears TWICE per event (once in a
+        # nav/menu widget with no date nearby, once in the real content
+        # body). Taking only the FIRST occurrence sometimes grabbed the
+        # nav one. Fixed by trying every occurrence of the href and using
+        # whichever one actually has a date within reach.
+        d = None
+        for occ in re.finditer(re.escape(href_frag), raw):
+            window = raw[occ.end():occ.end()+800]
+            d_m = re.search(
+                r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s*\d{4}',
+                window)
+            if d_m:
+                d_candidate = parse_date(d_m.group(0))
+                if d_candidate:
+                    d = d_candidate
+                    break
         if not d:
             no_date += 1
+            if no_date <= 2:
+                window = raw[m.end():m.end()+800]
+                sample = clean(re.sub(r'<[^>]+>', ' ', window))[:250]
+                print(f'    [Atlantis] no-date sample ({slug}): {sample!r}', file=sys.stderr)
             continue
         link = f'https://atlantiscasino.com/more/events/{href_frag}'
         ev = make_ev(scrape_id('atl2', slug), title,
@@ -1020,6 +1046,7 @@ def scrape_eventbrite():
     seen = set()
     no_date_found = 0
     unresolved_relative = 0
+    make_ev_rejected = 0
     urls = [
         'https://www.eventbrite.com/d/nv--reno/events/',
         'https://www.eventbrite.com/d/nv--reno/events--this-weekend/',
@@ -1092,10 +1119,17 @@ def scrape_eventbrite():
                          guess_cat(title), d, 'reno', venue, 'Reno, NV',
                          None, None, False, f'{title} — via Eventbrite.',
                          ['Eventbrite'], link, 'Eventbrite')
-            if ev: events.append(ev)
+            if ev:
+                events.append(ev)
+            else:
+                make_ev_rejected += 1
+                if make_ev_rejected <= 3:
+                    print(f'    [Eventbrite] rejected: title={title!r}, d={d!r}, '
+                          f'venue={venue!r}, TODAY={TODAY}, UNTIL={UNTIL}', file=sys.stderr)
         time.sleep(0.5)
     print(f'    unique_events_found={len(seen)}, no_date_found={no_date_found}, '
-          f'unresolved_relative={unresolved_relative}', file=sys.stderr)
+          f'unresolved_relative={unresolved_relative}, make_ev_rejected={make_ev_rejected}',
+          file=sys.stderr)
     print(f'    → {len(events)}', file=sys.stderr)
     return events
 
@@ -1263,6 +1297,7 @@ def scrape_tm_venues():
         ('KovZpZAEAl6A', 'Cargo Concert Hall – Whitney Peak Hotel', '255 N Virginia St, Reno', 'reno'),
         ('KovZpZA6kkAA', 'Crystal Bay Casino – Crown Room', '14 NV-28, Crystal Bay NV', 'tahoe'),
         ('KovZpZA6AekA', "Harrah's/Harveys Lake Tahoe", 'Highway 50, Stateline NV', 'tahoe'),
+        ('467963', 'Laugh Factory at the Silver Legacy Casino', '407 N Virginia St, Reno', 'reno'),
     ]
 
     events = []
@@ -1604,6 +1639,7 @@ ALL_SCRAPERS = {
     'val':     scrape_valhalla,
     'sky':     scrape_skytavern,
     'lal':     scrape_live_lakeview,
+    'renoimp': scrape_reno_improv,
     'alibi':   scrape_alibi,
     'lnp':     scrape_lateniteproductions,
     'tixr':    scrape_tixr_playwright,
