@@ -193,12 +193,18 @@ def guess_cat(title, desc=''):
 # prefix/whole-title match, not a loose substring, to avoid mangling
 # titles that already legitimately contain these words alongside a name
 # (e.g. "DJ Shadow Live" should NOT be treated as generic).
+# Generic event-type phrases that don't name who's actually performing.
+# Matched as a substring anywhere in the title (real titles are usually
+# "{Venue} – DJ Night" or "DJ Night at {Venue}", not the bare phrase
+# alone) — but each pattern is specific enough that it won't accidentally
+# match a title that already legitimately names a real act alongside it
+# (e.g. "Mikey Lion Live at Dead Ringer" contains none of these phrases).
 GENERIC_TITLE_PATTERNS = [
-    r'^dj\s*night$', r'^live\s*dj$', r'^dj\s*set$', r'^dance\s*party$',
-    r'^live\s*music$', r'^live\s*band$', r'^open\s*mic(\s*night)?$',
-    r'^trivia(\s*night)?$', r'^karaoke(\s*night)?$', r'^comedy\s*night$',
-    r'^stand[\s-]*up(\s*comedy)?(\s*night)?$', r'^bingo(\s*night)?$',
-    r'^speaker\s*series$', r'^guest\s*speaker$', r'^live\s*entertainment$',
+    r'dj\s*night', r'live\s*dj\b', r'dj\s*set', r'dance\s*party',
+    r'live\s*music', r'live\s*band', r'open\s*mic',
+    r'\btrivia\b', r'\bkaraoke\b', r'comedy\s*night',
+    r'stand[\s-]*up(\s*comedy)?(\s*night)?', r'\bbingo\b',
+    r'speaker\s*series', r'guest\s*speaker', r'live\s*entertainment',
 ]
 # Marker phrases that reliably precede a real name in a description
 NAME_MARKER_RE = re.compile(
@@ -212,7 +218,7 @@ def enrich_title_with_name(title, desc):
     title unchanged if it's not generic or no name can be found."""
     if not title or not desc: return title
     t_clean = title.strip().lower()
-    if not any(re.match(p, t_clean) for p in GENERIC_TITLE_PATTERNS):
+    if not any(re.search(p, t_clean) for p in GENERIC_TITLE_PATTERNS):
         return title
     m = NAME_MARKER_RE.search(desc)
     if not m: return title
@@ -220,6 +226,16 @@ def enrich_title_with_name(title, desc):
     # Reject junk matches: too short, too long, or just a common word
     if len(name) < 2 or len(name) > 40: return title
     if name.lower() in ('the', 'a', 'an', 'our', 'you', 'us'): return title
+    # CONFIRMED BUG, found 2026-07-04 auditing real events.json: stored
+    # descriptions are truncated to 150 chars (see make_ev below), and a
+    # name-marker landing right at that cutoff can capture a mid-word
+    # fragment ("Featuring Midn" from a truncated "Midnight..."). A
+    # single truncated word ending exactly at the description's boundary
+    # is the signature of this — multi-word matches ("Mickey Holiday")
+    # ending near the boundary are fine, since the regex needed a full
+    # first word + space + second word to match that far already.
+    if len(desc) >= 149 and m.end(1) >= len(desc) - 2 and ' ' not in name:
+        return title
     return f'{title} – {name}'
 
 def make_ev(eid, title, cat, date_str, region, venue, addr,
@@ -527,6 +543,63 @@ def scrape_live_lakeview():
     # working Visit Lake Tahoe (Tribe) source via visitlaketahoe.com.
     # Not a real coverage gap.
     return []
+
+def scrape_deadringer():
+    # BUILT 2026-07-04: this is the direct fix for the Lee Reynolds/Mikey
+    # Lion incident — a manually-researched static entry went stale after
+    # a real lineup change, and the old dedup() rule permanently blocked
+    # ANY scraped update for this venue from ever correcting it. Confirmed
+    # deadringernv.com is image-only (no text/dates in raw HTML), BUT the
+    # outbound ticket links (mostly Eventbrite) are real, individually
+    # fetchable pages with reliable title/date data — same proven method
+    # as the general Eventbrite scraper. tixco.co links are skipped for
+    # now (unfamiliar platform, not verifying blind).
+    print('  Dead Ringer Analog Bar…', file=sys.stderr)
+    raw = get('https://deadringernv.com/')
+    if not raw:
+        print('    no response', file=sys.stderr)
+        return []
+    events = []
+    seen = set()
+    no_date_found = 0
+    for m in re.finditer(r'eventbrite\.com/e/([a-z0-9-]+-tickets-\d+)', raw, re.I):
+        slug = m.group(1)
+        if slug in seen: continue
+        seen.add(slug)
+        ev_url = f'https://www.eventbrite.com/e/{slug}'
+        ev_raw = get(ev_url)
+        if not ev_raw: continue
+        def meta(name, text=ev_raw):
+            mm = re.search(
+                rf'<meta[^>]+(?:name|property)=["\']{re.escape(name)}["\'][^>]+content=["\']([^"\']*)["\']',
+                text, re.I)
+            return html.unescape(mm.group(1)) if mm else ''
+        title = meta('og:title')
+        title = re.sub(r'\s*Tickets.*$', '', title, flags=re.I).strip()
+        title = re.sub(r'\s*at\s+Dead\s+Ringer.*$', '', title, flags=re.I).strip()
+        if not title: continue
+        start_raw = meta('event:start_time') or meta('og:start_date')
+        d = parse_date(start_raw) if start_raw else None
+        if not d:
+            # Fall back to date embedded in visible page text
+            d_m = re.search(
+                r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s*\d{4}',
+                ev_raw)
+            if d_m: d = parse_date(d_m.group(0))
+        if not d:
+            no_date_found += 1
+            continue
+        desc = meta('og:description') or meta('description')
+        ev = make_ev(scrape_id('dr', slug), f'Dead Ringer – {title}',
+                     'dj', d, 'reno', 'Dead Ringer Analog Bar',
+                     '432 E 4th St, Reno, NV', to_12h(start_raw) if start_raw else None,
+                     None, False, desc, ['DJ', 'Dead Ringer'], ev_url,
+                     'Dead Ringer Analog Bar')
+        if ev: events.append(ev)
+        time.sleep(0.3)
+    print(f'    unique_events_found={len(seen)}, no_date_found={no_date_found}', file=sys.stderr)
+    print(f'    → {len(events)}', file=sys.stderr)
+    return events
 
 def scrape_reno_improv():
     # BUILT 2026-07-01: confirmed real, live Tribe/WordPress events calendar
@@ -1599,32 +1672,67 @@ def title_similarity(t1, t2):
 def dedup(static_events, scraped_events):
     """
     Merge static + scraped with smart deduplication.
-    Static events always win.
-    Scraped events are dropped if they match any static event by:
+
+    PRIORITY FIX 2026-07-04: the old rule was "static always wins,
+    unconditionally" — which is EXACTLY the mechanism that let a stale
+    manually-researched entry (wrong DJ name after a lineup change) sit
+    unfixed forever, since Dead Ringer was also hard-blocked from ever
+    receiving scraped updates via FULLY_COVERED_VENUES. Fixed rule:
+    static still wins by default (a human specifically researched it),
+    UNLESS the static entry is a GENERIC placeholder (e.g. "DJ Night"
+    with no real name) and a scraped event for the same venue+date
+    names an actual act — in that case the scraped, more specific data
+    supersedes the generic static placeholder instead of being silently
+    dropped forever.
+
+    Scraped events are dropped if they match any NON-generic static
+    event by:
       1. Exact ID match
       2. Same date + normalized title similarity (prefix match or 80% word overlap)
     Among scraped events themselves, same dedup logic applies.
     """
     static_ids = {ev['id'] for ev in static_events}
 
-    # Build index of static (norm_title, date) pairs
-    static_index = []  # list of (norm_title, date)
+    def is_generic(title):
+        t = (title or '').strip().lower()
+        return any(re.search(p, t) for p in GENERIC_TITLE_PATTERNS)
+
+    def norm_venue(v):
+        return re.sub(r'[^a-z0-9]', '', (v or '').lower())
+
+    # Build index of static (norm_title, date, is_generic, norm_venue)
+    static_index = []
     for ev in static_events:
-        static_index.append((norm_title(ev['title']), ev['date']))
+        static_index.append((norm_title(ev['title']), ev['date'],
+                             is_generic(ev['title']), norm_venue(ev.get('venue'))))
 
     def matches_static(ev):
+        """Returns 'block' if this scraped event duplicates a real
+        (non-generic) static event by title+date, 'supersede' if it
+        shares venue+date with a GENERIC static placeholder (the whole
+        point: a generic placeholder's title never mentions the real
+        act, so title-similarity can't be the match key here — venue+
+        date is), or None if no match."""
         nt = norm_title(ev['title'])
         d  = ev['date']
-        for s_nt, s_d in static_index:
+        nv = norm_venue(ev.get('venue'))
+        matched_generic = False
+        for s_nt, s_d, s_generic, s_nv in static_index:
             if s_d != d: continue
-            if title_similarity(nt, s_nt): return True
-        return False
+            if not s_generic and title_similarity(nt, s_nt):
+                return 'block'
+            if s_generic and nv and s_nv and nv == s_nv:
+                matched_generic = True
+        return 'supersede' if matched_generic else None
 
-    # Also build venue+date index from static to block all scraped events
-    # for venues we already have good static coverage of
+    # Venues where we deliberately keep ONLY the static entries (no
+    # automated scraper exists or should exist for these — e.g. one-off
+    # community park series). Dead Ringer was REMOVED from this list
+    # 2026-07-04 — it has generic placeholders that need to be
+    # supersedable by real scraped data, not permanently walled off.
     static_venue_dates = set()
     FULLY_COVERED_VENUES = {
-        'dead ringer analog bar', 'greater nevada field', 'sky tavern bike park',
+        'greater nevada field', 'sky tavern bike park',
         'idlewild park', 'west street plaza', 'wingfield park',
     }
     for ev in static_events:
@@ -1632,15 +1740,22 @@ def dedup(static_events, scraped_events):
         if any(fv in v for fv in FULLY_COVERED_VENUES):
             static_venue_dates.add((v[:30], ev['date']))
 
+    # Track which static events get superseded so we can remove them
+    # from the final output instead of ending up with both a generic
+    # placeholder AND the real scraped event side by side
+    superseded_static_keys = set()
+
     # Filter scraped against static
     unique_scraped = []
     seen_scraped   = []  # list of (norm_title, date) already added from scraped
 
     for ev in scraped_events:
         if ev['id'] in static_ids: continue
-        if matches_static(ev): continue
+        match_result = matches_static(ev)
+        if match_result == 'block': continue
         # Skip if we have full static coverage of this venue on this date
         v = (ev.get('venue') or '').lower()
+        v_norm = norm_venue(v)
         if any(fv in v for fv in FULLY_COVERED_VENUES):
             if (v[:30], ev['date']) in static_venue_dates: continue
 
@@ -1655,10 +1770,24 @@ def dedup(static_events, scraped_events):
                 break
         if is_dup: continue
 
+        if match_result == 'supersede':
+            # Mark the matching generic static event(s) for removal —
+            # matched on venue+date (not title similarity — a generic
+            # placeholder's title never mentions the real act by design)
+            for s_ev in static_events:
+                if s_ev['date'] == d and is_generic(s_ev['title']) and \
+                   norm_venue(s_ev.get('venue')) == v_norm:
+                    superseded_static_keys.add(s_ev['id'])
+
         seen_scraped.append((nt, d))
         unique_scraped.append(ev)
 
-    merged = static_events + unique_scraped
+    kept_static = [ev for ev in static_events if ev['id'] not in superseded_static_keys]
+    if superseded_static_keys:
+        print(f'    [dedup] {len(superseded_static_keys)} generic static placeholder(s) '
+              f'superseded by real scraped data', file=sys.stderr)
+
+    merged = kept_static + unique_scraped
     merged.sort(key=lambda e: e['date'])
     return merged, len(unique_scraped)
 
@@ -1678,6 +1807,7 @@ ALL_SCRAPERS = {
     'val':     scrape_valhalla,
     'sky':     scrape_skytavern,
     'lal':     scrape_live_lakeview,
+    'deadringer': scrape_deadringer,
     'renoimp': scrape_reno_improv,
     'alibi':   scrape_alibi,
     'lnp':     scrape_lateniteproductions,
