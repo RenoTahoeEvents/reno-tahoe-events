@@ -510,10 +510,27 @@ def scrape_skytavern():
         print('    no response', file=sys.stderr)
         return []
     events = []
-    seen = set()
     no_date_found = 0
-    for m in re.finditer(r'/sky-tavern-calendar/([a-z0-9-]+)', raw, re.I):
+    # DIAGNOSED 2026-07-04 with real evidence (3 failed fix attempts, then
+    # finally added a raw-sample dump): each event's thumbnail image has
+    # TWO full Squarespace CDN URLs (data-src and data-image, 100+ chars
+    # each) sitting right after the link — a fixed window of even 800
+    # chars gets entirely consumed by those before ever reaching the real
+    # date. Real fix: don't guess a window size at all. Find every
+    # distinct event link position, then search from each one to the
+    # START of the NEXT distinct event's link — this captures the whole
+    # real block regardless of how verbose the markup is.
+    all_matches = list(re.finditer(r'/sky-tavern-calendar/([a-z0-9-]+)', raw, re.I))
+    seen = set()
+    # Collect the first occurrence position of each distinct slug, in order
+    first_pos = {}
+    for m in all_matches:
         slug = m.group(1)
+        if slug not in first_pos:
+            first_pos[slug] = m.start()
+    ordered_slugs = sorted(first_pos.keys(), key=lambda s: first_pos[s])
+
+    for i, slug in enumerate(ordered_slugs):
         if slug in seen: continue
         seen.add(slug)
         title_m = re.search(
@@ -522,29 +539,21 @@ def scrape_skytavern():
         if not title_m: continue
         title = clean(title_m.group(1))
         if not title: continue
-        # DIAGNOSED 2026-07-04: same root cause as Atlantis — this href
-        # appears more than once per event (image-wrapper link before the
-        # title, title link itself, "View Event" link after). Taking only
-        # the first occurrence's forward window sometimes missed the
-        # Google Calendar link entirely. Fixed by trying every occurrence.
+        start = first_pos[slug]
+        end = first_pos[ordered_slugs[i+1]] if i+1 < len(ordered_slugs) else len(raw)
+        block = raw[start:end]
+        date_m = re.search(r'dates=(\d{8})T(\d{6})Z', block)
         d = None
-        for occ in re.finditer(re.escape(f'/sky-tavern-calendar/{slug}'), raw):
-            window = raw[occ.end():occ.end()+800]
-            date_m = re.search(r'dates=(\d{8})T(\d{6})Z', window)
-            if date_m:
-                date_part = date_m.group(1)
-                d_candidate = f'{date_part[0:4]}-{date_part[4:6]}-{date_part[6:8]}'
-                if parse_date(d_candidate):
-                    d = d_candidate
-                    break
+        if date_m:
+            date_part = date_m.group(1)
+            d_candidate = f'{date_part[0:4]}-{date_part[4:6]}-{date_part[6:8]}'
+            if parse_date(d_candidate):
+                d = d_candidate
         if not d:
             no_date_found += 1
             if no_date_found <= 2:
-                # Same technique that solved Atlantis and GSR — stop
-                # guessing at fix attempt #4, see the actual raw text.
-                first_occ = raw.find(f'/sky-tavern-calendar/{slug}')
-                sample_window = raw[first_occ:first_occ+900] if first_occ >= 0 else ''
-                print(f'    [Sky Tavern] no-date raw sample ({slug}): {sample_window[:500]!r}',
+                print(f'    [Sky Tavern] no-date in full block ({slug}), '
+                      f'block_len={len(block)}, sample={clean(block)[:300]!r}',
                       file=sys.stderr)
             continue
         link = f'https://www.skytavern.org/sky-tavern-calendar/{slug}'
