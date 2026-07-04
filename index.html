@@ -885,13 +885,20 @@ function rWeek(){
   const DOWS=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
   const wl=`${dt(days[0]).toLocaleDateString('en-US',{month:'short',day:'numeric'})} – ${dt(days[6]).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}`;
 
-  // Build events per day, sorted by time
+  // Build events per day. Only force time-of-day order when sort mode is
+  // "date" — otherwise keep getF()'s already-applied order (same fix as
+  // Day view; this was silently discarding Free First/Category/A-Z here too).
+  const srt=(document.getElementById('srtsel')||{}).value||'date';
   const byDay={};
   days.forEach(d=>{
-    byDay[d]=f.filter(ev=>{
+    let devs=f.filter(ev=>{
       const s=dt(ev.date),en=ev.end?dt(ev.end):s,t=dt(d);
       return t>=s&&t<=en;
-    }).sort((a,b)=>{const ha=phr(a.time||''),hb=phr(b.time||'');return(ha<0?99:ha)-(hb<0?99:hb)||a.title.localeCompare(b.title);});
+    });
+    if(srt==='date'){
+      devs=devs.sort((a,b)=>{const ha=phr(a.time||''),hb=phr(b.time||'');return(ha<0?99:ha)-(hb<0?99:hb)||a.title.localeCompare(b.title);});
+    }
+    byDay[d]=devs;
   });
 
   let h=`<div class="cal-wrap">
@@ -1007,8 +1014,16 @@ function weekNav(dir){if(!dir){ws=gws(new Date());}else{const d=dt(ws);d.setDate
 // ── DAY ──────────────────────────────────────────────────
 function rDay(){
   if(calDay<TD())calDay=TD();
-  const devs=getF().filter(ev=>{const s=dt(ev.date),en=ev.end?dt(ev.end):s,t=dt(calDay);return t>=s&&t<=en;})
-    .sort((a,b)=>{const ha=phr(a.time||'0 AM'),hb=phr(b.time||'0 AM');return ha-hb||a.title.localeCompare(b.title);});
+  const srt=(document.getElementById('srtsel')||{}).value||'date';
+  // getF() already applies the chosen sort (date/cat/free/az/venue) — only
+  // re-sort by time-of-day here when the mode IS "date", since that's the
+  // sensible default for a single day. Any other mode should keep getF()'s
+  // order instead of silently overriding it (this was the actual bug —
+  // Free First / Category / A-Z were always being discarded here).
+  let devs=getF().filter(ev=>{const s=dt(ev.date),en=ev.end?dt(ev.end):s,t=dt(calDay);return t>=s&&t<=en;});
+  if(srt==='date'){
+    devs=devs.sort((a,b)=>{const ha=phr(a.time||'0 AM'),hb=phr(b.time||'0 AM');return ha-hb||a.title.localeCompare(b.title);});
+  }
   let h=`<div class="cal-wrap">
     <div class="cal-header">
       <button class="cal-nav" onclick="dayNav(-1)" title="Previous day" aria-label="Previous day">
@@ -1025,10 +1040,28 @@ function rDay(){
     </div>`;
   if(!devs.length){h+=`<div class="empty" style="padding:2rem"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;flex-shrink:0;"><path d="M9 2v2m6-2v2"/><path d="M3 10h18"/><path d="M4.5 4.5A2 2 0 0 0 3 6.5V19a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6.5a2 2 0 0 0-1.5-1.97"/><line x1="3" y1="3" x2="21" y2="21"/></svg><p>No events. Use ▶ to navigate forward.</p></div>`;}
   else{
-    const byT={};devs.forEach(ev=>{const t=ev.time||'All day';if(!byT[t])byT[t]=[];byT[t].push(ev);});
     h+=`<div class="day-list">`;
-    Object.entries(byT).sort(([a],[b])=>{const ha=phr(a),hb=phr(b);return ha<0?-1:hb<0?1:ha-hb;}).forEach(([time,evs])=>{
-      evs.forEach(ev=>{
+    if(srt==='date'){
+      // Chronological mode: group rows under time buckets, buckets in time order
+      const byT={};devs.forEach(ev=>{const t=ev.time||'All day';if(!byT[t])byT[t]=[];byT[t].push(ev);});
+      Object.entries(byT).sort(([a],[b])=>{const ha=phr(a),hb=phr(b);return ha<0?-1:hb<0?1:ha-hb;}).forEach(([time,evs])=>{
+        evs.forEach(ev=>{
+          const c=CM[ev.cat]||CM.community;
+          h+=`<div class="drow" data-eid="${ev.id}">
+            <div class="drow-time">${esc(ev.time||'All day')}</div>
+            <div class="drow-dot" style="background:${c.dot}"></div>
+            <div class="drow-body">
+              <div class="drow-title">${esc(ev.title)}${ev.isFree?'<span class="free-tag">Free</span>':''}</div>
+              <div class="drow-sub"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;vertical-align:middle;flex-shrink:0;"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>${esc(ev.venue)}</div>
+            </div>
+            <div class="drow-cat" style="color:${c.dot}">${c.l}</div>
+          </div>`;
+        });
+      });
+    }else{
+      // Any other sort mode: render in getF()'s already-sorted flat order,
+      // no time-bucket regrouping (each row still shows its own time inline)
+      devs.forEach(ev=>{
         const c=CM[ev.cat]||CM.community;
         h+=`<div class="drow" data-eid="${ev.id}">
           <div class="drow-time">${esc(ev.time||'All day')}</div>
@@ -1040,7 +1073,7 @@ function rDay(){
           <div class="drow-cat" style="color:${c.dot}">${c.l}</div>
         </div>`;
       });
-    });
+    }
     h+=`</div>`;
   }
   return h+'</div>';
