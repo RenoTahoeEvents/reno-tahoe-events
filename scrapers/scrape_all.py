@@ -1616,11 +1616,23 @@ def dedup(static_events, scraped_events):
     unfixed forever, since Dead Ringer was also hard-blocked from ever
     receiving scraped updates via FULLY_COVERED_VENUES. Fixed rule:
     static still wins by default (a human specifically researched it),
-    UNLESS the static entry is a GENERIC placeholder (e.g. "DJ Night"
-    with no real name) and a scraped event for the same venue+date
-    names an actual act — in that case the scraped, more specific data
-    supersedes the generic static placeholder instead of being silently
-    dropped forever.
+    UNLESS the static entry is LOW-QUALITY (a generic placeholder like
+    "DJ Night" with no real name, OR its url is just a bare homepage
+    with no specific event page) and a scraped event for the same
+    venue+date has real, specific data — in that case the scraped data
+    supersedes the low-quality static placeholder instead of being
+    silently dropped forever.
+
+    SECOND FIX 2026-07-04: added a static-vs-static dedup pass. Found
+    via audit that two manually-researched entries can describe the
+    same real event under different titles (e.g. "Ritual – Reno Goth
+    Night (1st Sat)" vs "...(1st Saturday @ Dead Ringer)") and nothing
+    was ever checking for this. IMPORTANT: this MUST require the same
+    venue, not just date + title similarity — an early version of this
+    check without venue-matching produced dozens of false positives,
+    since many different real venues legitimately share the exact same
+    generic title ("DJ Night") on the same date without being duplicates
+    of each other at all.
 
     Scraped events are dropped if they match any NON-generic static
     event by:
@@ -1629,36 +1641,91 @@ def dedup(static_events, scraped_events):
     Among scraped events themselves, same dedup logic applies.
     """
     static_ids = {ev['id'] for ev in static_events}
+    BARE_HOMEPAGE_RE = re.compile(r'^https?://[^/]+/?$')
 
     def is_generic(title):
         t = (title or '').strip().lower()
         return any(re.search(p, t) for p in GENERIC_TITLE_PATTERNS)
 
+    def is_low_quality(ev):
+        """A static entry is a candidate for superseding if its title is
+        generic OR its url is just a bare homepage (no specific event
+        page) — both are signs it was a placeholder, not verified detail."""
+        return is_generic(ev['title']) or bool(BARE_HOMEPAGE_RE.match(ev.get('url') or ''))
+
     def norm_venue(v):
         return re.sub(r'[^a-z0-9]', '', (v or '').lower())
 
-    # Build index of static (norm_title, date, is_generic, norm_venue)
+    # ── Static-vs-static dedup pass ──
+    # Only merges when BOTH venue AND date match AND titles are similar —
+    # all three required, or real distinct events (different venues that
+    # happen to share a generic title) get wrongly merged.
+    from collections import defaultdict
+    by_date_venue = defaultdict(list)
+    for ev in static_events:
+        by_date_venue[(ev['date'], norm_venue(ev.get('venue')))].append(ev)
+
+    static_dupe_ids_to_drop = set()
+    for (d, v), evs in by_date_venue.items():
+        if len(evs) < 2 or not v: continue
+        for i in range(len(evs)):
+            if evs[i]['id'] in static_dupe_ids_to_drop: continue
+            for j in range(i+1, len(evs)):
+                if evs[j]['id'] in static_dupe_ids_to_drop: continue
+                if title_similarity(norm_title(evs[i]['title']), norm_title(evs[j]['title'])):
+                    # Keep whichever has the longer/more complete
+                    # description first (most reliable signal of more
+                    # thorough research) — a bare-homepage-vs-not check
+                    # was tried first but backfired: a Facebook group URL
+                    # like facebook.com/somegroup/ has a path segment that
+                    # looks "more specific" than a bare homepage, even
+                    # though it's just as generic in practice (not an
+                    # actual event page). Description length is more
+                    # reliable. Only fall back to URL-bareness as a
+                    # tiebreak when descriptions are near-identical length.
+                    a, b = evs[i], evs[j]
+                    len_a, len_b = len(a.get('desc','')), len(b.get('desc',''))
+                    if abs(len_a - len_b) > 15:
+                        static_dupe_ids_to_drop.add(a['id'] if len_a < len_b else b['id'])
+                    else:
+                        a_bare = bool(BARE_HOMEPAGE_RE.match(a.get('url') or ''))
+                        b_bare = bool(BARE_HOMEPAGE_RE.match(b.get('url') or ''))
+                        if a_bare and not b_bare:
+                            static_dupe_ids_to_drop.add(a['id'])
+                        elif b_bare and not a_bare:
+                            static_dupe_ids_to_drop.add(b['id'])
+                        else:
+                            static_dupe_ids_to_drop.add(a['id'] if len_a <= len_b else b['id'])
+
+    if static_dupe_ids_to_drop:
+        print(f'    [dedup] {len(static_dupe_ids_to_drop)} static-vs-static '
+              f'duplicate(s) found (same venue+date+similar title) — kept '
+              f'the more complete entry for each', file=sys.stderr)
+    static_events = [ev for ev in static_events if ev['id'] not in static_dupe_ids_to_drop]
+    static_ids = {ev['id'] for ev in static_events}
+
+    # Build index of static (norm_title, date, is_low_quality, norm_venue)
     static_index = []
     for ev in static_events:
         static_index.append((norm_title(ev['title']), ev['date'],
-                             is_generic(ev['title']), norm_venue(ev.get('venue'))))
+                             is_low_quality(ev), norm_venue(ev.get('venue'))))
 
     def matches_static(ev):
         """Returns 'block' if this scraped event duplicates a real
-        (non-generic) static event by title+date, 'supersede' if it
-        shares venue+date with a GENERIC static placeholder (the whole
-        point: a generic placeholder's title never mentions the real
-        act, so title-similarity can't be the match key here — venue+
-        date is), or None if no match."""
+        (non-low-quality) static event by title+date, 'supersede' if it
+        shares venue+date with a LOW-QUALITY static placeholder (generic
+        title or bare-homepage url — title-similarity can't be the match
+        key for these since a placeholder's title/url never mentions the
+        real specifics), or None if no match."""
         nt = norm_title(ev['title'])
         d  = ev['date']
         nv = norm_venue(ev.get('venue'))
         matched_generic = False
-        for s_nt, s_d, s_generic, s_nv in static_index:
+        for s_nt, s_d, s_low_quality, s_nv in static_index:
             if s_d != d: continue
-            if not s_generic and title_similarity(nt, s_nt):
+            if not s_low_quality and title_similarity(nt, s_nt):
                 return 'block'
-            if s_generic and nv and s_nv and nv == s_nv:
+            if s_low_quality and nv and s_nv and nv == s_nv:
                 matched_generic = True
         return 'supersede' if matched_generic else None
 
@@ -1708,11 +1775,11 @@ def dedup(static_events, scraped_events):
         if is_dup: continue
 
         if match_result == 'supersede':
-            # Mark the matching generic static event(s) for removal —
-            # matched on venue+date (not title similarity — a generic
-            # placeholder's title never mentions the real act by design)
+            # Mark the matching low-quality static event(s) for removal —
+            # matched on venue+date (a placeholder's title/url never
+            # mentions the real specifics by design)
             for s_ev in static_events:
-                if s_ev['date'] == d and is_generic(s_ev['title']) and \
+                if s_ev['date'] == d and is_low_quality(s_ev) and \
                    norm_venue(s_ev.get('venue')) == v_norm:
                     superseded_static_keys.add(s_ev['id'])
 
