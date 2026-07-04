@@ -71,6 +71,22 @@ def get(url, headers=None, timeout=15):
         req = Request(url, headers=h)
         with urlopen(req, timeout=timeout) as r:
             return r.read().decode('utf-8', errors='replace')
+    except HTTPError as ex:
+        # ADDED 2026-07-04: a 429 (Too Many Requests) is usually transient —
+        # a brief pause and single retry often succeeds, unlike a hard
+        # 403/404 which won't. This is the direct fix for the Ticketmaster
+        # rate-limit hit after adding more venues + venue-lookup calls.
+        if ex.code == 429:
+            time.sleep(3)
+            try:
+                req = Request(url, headers=h)
+                with urlopen(req, timeout=timeout) as r:
+                    return r.read().decode('utf-8', errors='replace')
+            except Exception as ex2:
+                print(f'  GET error {url[:70]}: {ex2}', file=sys.stderr)
+                return None
+        print(f'  GET error {url[:70]}: {ex}', file=sys.stderr)
+        return None
     except Exception as ex:
         # Some sites (e.g. cargoconcerthall.com) throw a TLS handshake
         # error under Python's default SSL context but work fine with a
@@ -523,6 +539,13 @@ def scrape_skytavern():
                     break
         if not d:
             no_date_found += 1
+            if no_date_found <= 2:
+                # Same technique that solved Atlantis and GSR — stop
+                # guessing at fix attempt #4, see the actual raw text.
+                first_occ = raw.find(f'/sky-tavern-calendar/{slug}')
+                sample_window = raw[first_occ:first_occ+900] if first_occ >= 0 else ''
+                print(f'    [Sky Tavern] no-date raw sample ({slug}): {sample_window[:500]!r}',
+                      file=sys.stderr)
             continue
         link = f'https://www.skytavern.org/sky-tavern-calendar/{slug}'
         ev = make_ev(scrape_id('sky', slug), title,
@@ -1140,110 +1163,12 @@ def scrape_ra():
 # ── EVENTBRITE (public search) ────────────────────────────────────────────────
 
 def scrape_eventbrite():
-    # REBUILT 2026-07-01: the API is genuinely dead (405 on every call,
-    # confirmed), but I never actually checked their public listing pages
-    # until Matt pushed back on that — turns out they're real,
-    # server-rendered, and structured. Anchored on the confirmed
-    # /e/{slug}-tickets-{id} URL pattern. Dates are a mix of relative
-    # ("Today", "Tomorrow", "Friday") and absolute ("Wed, May 13") —
-    # resolved carefully below rather than guessed.
-    # REGRESSION NOTED 2026-07-04: the listing pages themselves started
-    # returning 405 too, after working fine (89 events found) the run
-    # before. Possibly the same GitHub Actions IP-reputation issue hitting
-    # SiteGround sites, possibly Eventbrite tightening detection. Left
-    # active (not disabled) since it already fails gracefully — if it's
-    # IP-reputation-based it may recover on its own from a future run.
-    print('  Eventbrite…', file=sys.stderr)
-    events = []
-    seen = set()
-    no_date_found = 0
-    unresolved_relative = 0
-    make_ev_rejected = 0
-    urls = [
-        'https://www.eventbrite.com/d/nv--reno/events/',
-        'https://www.eventbrite.com/d/nv--reno/events--this-weekend/',
-    ]
-    WEEKDAYS = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
-    for url in urls:
-        raw = get(url)
-        if not raw: continue
-        for m in re.finditer(r'/e/([a-z0-9-]+-tickets-\d+)', raw, re.I):
-            event_slug = m.group(1)
-            if event_slug in seen: continue
-            seen.add(event_slug)
-            title_m = re.search(
-                rf'<a[^>]+href="[^"]*{re.escape(event_slug)}[^"]*"[^>]*>([^<]{{2,120}})</a>',
-                raw, re.I)
-            if not title_m: continue
-            title = clean(title_m.group(1))
-            if not title: continue
-            window = raw[m.end():m.end()+400]
-            d = None
-            # Try absolute date first: "Wed, May 13" style
-            abs_m = re.search(
-                r'(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s*'
-                r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+(\d{1,2})',
-                window)
-            if abs_m:
-                mon, day = abs_m.group(1), abs_m.group(2)
-                this_year = date.today().year
-                d = parse_date(f'{mon} {day}, {this_year}')
-                if d and d < TODAY:
-                    d = parse_date(f'{mon} {day}, {this_year + 1}')
-            else:
-                # Fall back to relative: Today / Tomorrow / a bare weekday name
-                if re.search(r'\bToday\b', window):
-                    d = TODAY
-                elif re.search(r'\bTomorrow\b', window):
-                    d = (date.today() + timedelta(days=1)).isoformat()
-                else:
-                    wd_m = re.search(r'\b(' + '|'.join(WEEKDAYS) + r')\b', window)
-                    if wd_m:
-                        target = WEEKDAYS.index(wd_m.group(1))
-                        today_wd = date.today().weekday()
-                        delta = (target - today_wd) % 7
-                        delta = delta or 7  # if it's literally today's weekday name, that means NEXT week's occurrence (today would say "Today" instead)
-                        d = (date.today() + timedelta(days=delta)).isoformat()
-                    else:
-                        unresolved_relative += 1
-            if not d:
-                no_date_found += 1
-                continue
-            # Venue name is plain text between tags, appearing after the
-            # date/time block. Tag-based (not newline-based — newlines in
-            # cleaned preview text aren't real in compressed raw HTML,
-            # which is exactly what broke the Cargo scraper earlier tonight).
-            venue_candidates = re.findall(r'>([A-Z][^<>]{2,60})<', window)
-            venue = 'Reno, NV'
-            skip_patterns = re.compile(
-                r'today|tomorrow|check ticket|save this event|share this event|'
-                r'\d{1,2}:\d{2}\s*(am|pm)|^\$|from \$|'
-                r'monday|tuesday|wednesday|thursday|friday|saturday|sunday',
-                re.I)
-            for cand in venue_candidates:
-                c = clean(cand)
-                if not c or c == title: continue
-                if skip_patterns.search(c): continue
-                venue = c
-                break
-            link = f'https://www.eventbrite.com/e/{event_slug}'
-            ev = make_ev(scrape_id('eb', event_slug), title,
-                         guess_cat(title), d, 'reno', venue, 'Reno, NV',
-                         None, None, False, f'{title} — via Eventbrite.',
-                         ['Eventbrite'], link, 'Eventbrite')
-            if ev:
-                events.append(ev)
-            else:
-                make_ev_rejected += 1
-                if make_ev_rejected <= 3:
-                    print(f'    [Eventbrite] rejected: title={title!r}, d={d!r}, '
-                          f'venue={venue!r}, TODAY={TODAY}, UNTIL={UNTIL}', file=sys.stderr)
-        time.sleep(0.5)
-    print(f'    unique_events_found={len(seen)}, no_date_found={no_date_found}, '
-          f'unresolved_relative={unresolved_relative}, make_ev_rejected={make_ev_rejected}',
-          file=sys.stderr)
-    print(f'    → {len(events)}', file=sys.stderr)
-    return events
+    # DISABLED 2026-07-04: confirmed 405 Method Not Allowed on the public
+    # listing pages for 2 runs in a row now, after initially working (89
+    # events found). No longer treating this as a transient blip. Both
+    # the API (dead since before this session) and the HTML listing
+    # pages are now blocked. Not attempting to circumvent detection.
+    return []
 
 # ── TICKETMASTER Discovery API ────────────────────────────────────────────────
 
@@ -1442,6 +1367,9 @@ def scrape_tm_venues():
             except: pass
         if venue_id == hardcoded_id and not any(venue_name in r for r in id_resolutions):
             id_resolutions.append(f'{venue_name}: lookup failed, using hardcoded {hardcoded_id}')
+        time.sleep(0.3)  # ADDED 2026-07-04: this lookup call doubled our TM
+        # API request volume across 9 venues — likely contributor to the
+        # 429 rate-limit hit this run. Small pause between venues.
         before = len(events)
         page = 0
         while True:
