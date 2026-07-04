@@ -187,6 +187,41 @@ def guess_cat(title, desc=''):
             return cat
     return 'community'
 
+# Generic event-type titles that don't name who's actually performing —
+# if the description names a real act/DJ/speaker, that name gets pulled
+# into the title instead of leaving it generic. Matched as a strong
+# prefix/whole-title match, not a loose substring, to avoid mangling
+# titles that already legitimately contain these words alongside a name
+# (e.g. "DJ Shadow Live" should NOT be treated as generic).
+GENERIC_TITLE_PATTERNS = [
+    r'^dj\s*night$', r'^live\s*dj$', r'^dj\s*set$', r'^dance\s*party$',
+    r'^live\s*music$', r'^live\s*band$', r'^open\s*mic(\s*night)?$',
+    r'^trivia(\s*night)?$', r'^karaoke(\s*night)?$', r'^comedy\s*night$',
+    r'^stand[\s-]*up(\s*comedy)?(\s*night)?$', r'^bingo(\s*night)?$',
+    r'^speaker\s*series$', r'^guest\s*speaker$', r'^live\s*entertainment$',
+]
+# Marker phrases that reliably precede a real name in a description
+NAME_MARKER_RE = re.compile(
+    r'(?i:with|feat\.?|featuring|ft\.?|hosted by|dj|starring|presents?)\s+'
+    r'([A-Z][A-Za-z0-9&\'\.]+(?:\s+[A-Z][A-Za-z0-9&\'\.]+){0,3})',
+)
+
+def enrich_title_with_name(title, desc):
+    """If title is generic (DJ Night, Trivia, etc) and desc names a real
+    act/DJ/speaker, pull that name into the title. Returns the original
+    title unchanged if it's not generic or no name can be found."""
+    if not title or not desc: return title
+    t_clean = title.strip().lower()
+    if not any(re.match(p, t_clean) for p in GENERIC_TITLE_PATTERNS):
+        return title
+    m = NAME_MARKER_RE.search(desc)
+    if not m: return title
+    name = m.group(1).strip()
+    # Reject junk matches: too short, too long, or just a common word
+    if len(name) < 2 or len(name) > 40: return title
+    if name.lower() in ('the', 'a', 'an', 'our', 'you', 'us'): return title
+    return f'{title} – {name}'
+
 def make_ev(eid, title, cat, date_str, region, venue, addr,
             time_str, price, is_free, desc, tags, url, src):
     """Build a normalized event dict, returning None if invalid or out of range."""
@@ -198,6 +233,7 @@ def make_ev(eid, title, cat, date_str, region, venue, addr,
     # frontend, which would crash JS string methods (.toLowerCase, localeCompare etc)
     region = region if isinstance(region, str) and region else 'reno'
     cat    = cat if isinstance(cat, str) and cat else 'community'
+    title  = enrich_title_with_name(title, desc)
     return {
         'id':     eid,
         'title':  html.unescape(clean(title))[:120],
@@ -518,16 +554,13 @@ def scrape_alibi():
     return []
 
 def scrape_lateniteproductions():
-    print('  Late Nite Productions…', file=sys.stderr)
-    # Multi-city concert promoter (Reno, Tahoe, Truckee, Vacaville, Fresno, etc.)
-    # Each event carries its own venue/address from the API, so we leave
-    # default_venue/default_addr blank — make_ev()'s is_local() check strips
-    # out any non Reno/Tahoe-area shows (Vacaville, Fresno, Grass Valley, etc.)
-    evts = scrape_tribe('https://lateniteproductions.com', 'Late Nite Productions',
-                        'reno', '', '',
-                        extra_tags=['concert', 'live music'], max_pages=15)
-    print(f'    → {len(evts)}', file=sys.stderr)
-    return evts
+    # DISABLED 2026-07-04: CONFIRMED via raw response content — the site
+    # is serving a SiteGround "sgcaptcha" security challenge page instead
+    # of the API response, 3 runs in a row now. Likely GitHub Actions'
+    # shared IP ranges getting flagged by SiteGround's WAF (a known,
+    # common issue — not something specific to our request pattern).
+    # Same call as Tixr/RA: not attempting to defeat a CAPTCHA wall.
+    return []
 
 # ── TIXR — generic scraper for any venue selling through Tixr ─────────────
 # Tixr doesn't have a public unauthenticated API (their real API needs a
@@ -1041,6 +1074,12 @@ def scrape_eventbrite():
     # /e/{slug}-tickets-{id} URL pattern. Dates are a mix of relative
     # ("Today", "Tomorrow", "Friday") and absolute ("Wed, May 13") —
     # resolved carefully below rather than guessed.
+    # REGRESSION NOTED 2026-07-04: the listing pages themselves started
+    # returning 405 too, after working fine (89 events found) the run
+    # before. Possibly the same GitHub Actions IP-reputation issue hitting
+    # SiteGround sites, possibly Eventbrite tightening detection. Left
+    # active (not disabled) since it already fails gracefully — if it's
+    # IP-reputation-based it may recover on its own from a future run.
     print('  Eventbrite…', file=sys.stderr)
     events = []
     seen = set()
