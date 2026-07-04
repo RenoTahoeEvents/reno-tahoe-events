@@ -302,12 +302,72 @@ def scrape_downtown_reno():
     return evts
 
 def scrape_reno_scene():
-    # DISABLED 2026-07-01: therenoscene.com is not running the Tribe events
-    # plugin (confirmed 404 on /wp-json/tribe/events/v1/events — it's a
-    # custom Elementor/WP-Rocket build with no public JSON API). Needs a
-    # purpose-built HTML scraper, not the generic Tribe one. Skipping
-    # cleanly instead of throwing an HTTP error every hourly run.
-    return []
+    # BUILT 2026-07-01: confirmed real, alive, aggregates ~30 venues across
+    # 6 pages (Holland Project, Grand Sierra, Nugget, The Alpine, Cypress,
+    # Reno Events Center, and more). Anchored on two confirmed distinctive
+    # URL patterns: /concert/{id}-{slug}/ for each event's own title link,
+    # and /venue/{slug}/ for the venue link right after it. Date appears
+    # BEFORE the title (not after, unlike Atlantis) — grouped headers cover
+    # multiple consecutive events, so search backward for the nearest one.
+    print('  The Reno Scene…', file=sys.stderr)
+    events = []
+    seen = set()
+    total_html_len = 0
+    pages_fetched = 0
+    no_date_found = 0
+    no_venue_found = 0
+    for page in range(1, 7):
+        url = ('https://www.therenoscene.com/' if page == 1
+               else f'https://www.therenoscene.com/?wpv_view_count=7193&wpv_paged={page}')
+        raw = get(url)
+        if not raw: break
+        pages_fetched += 1
+        total_html_len += len(raw)
+        for m in re.finditer(r'/concert/(\d+-[a-z0-9-]+)/', raw, re.I):
+            concert_slug = m.group(1)
+            if concert_slug in seen: continue
+            seen.add(concert_slug)
+            title_m = re.search(
+                rf'<a[^>]+href="[^"]*{re.escape(concert_slug)}/?"[^>]*>([^<]{{2,120}})</a>',
+                raw, re.I)
+            if not title_m: continue
+            title = clean(title_m.group(1))
+            if not title: continue
+            # Date precedes the title — search backward for the nearest one
+            before_text = raw[max(0, m.start()-600):m.start()]
+            # NOTE: must use a non-capturing group (?:...) here — with a
+            # capturing group, re.findall() returns only the group's own
+            # content (just the month name), not the full "Month D, Year"
+            # match. Caught this via the sample-data test before shipping.
+            d_m_all = re.findall(
+                r'(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s*\d{4}',
+                before_text)
+            if not d_m_all:
+                no_date_found += 1
+                continue
+            d = parse_date(d_m_all[-1])  # last match = closest to this event
+            if not d: continue
+            # Venue link + doors/show time follows shortly after the title
+            after_text = raw[m.end():m.end()+400]
+            v_m = re.search(
+                r'<a[^>]+href="[^"]*/venue/([a-z0-9-]+)/?"[^>]*>([^<]{2,80})</a>\s*'
+                r'([\d: APM()doorsShow]+)?',
+                after_text, re.I)
+            venue = clean(v_m.group(2)) if v_m else 'Reno / Sparks'
+            time_str = clean(v_m.group(3)) if v_m and v_m.group(3) else None
+            link = f'https://www.therenoscene.com/concert/{concert_slug}/'
+            if not v_m:
+                no_venue_found += 1
+            ev = make_ev(scrape_id('trs', concert_slug), title,
+                         guess_cat(title), d, 'reno', venue, 'Reno, NV',
+                         time_str, None, False, f'{title} at {venue}.',
+                         ['Reno Scene'], link, 'The Reno Scene')
+            if ev: events.append(ev)
+    print(f'    pages_fetched={pages_fetched}, total_html_len={total_html_len}, '
+          f'unique_concerts_found={len(seen)}, no_date_found={no_date_found}, '
+          f'no_venue_found={no_venue_found}', file=sys.stderr)
+    print(f'    → {len(events)}', file=sys.stderr)
+    return events
 
 def scrape_holland():
     print('  Holland Project…', file=sys.stderr)
@@ -367,14 +427,70 @@ def scrape_valhalla():
     return []
 
 def scrape_skytavern():
-    # DISABLED 2026-07-01: skytavern.org 404s on the Tribe API — site has
-    # moved off the plugin or restructured. Needs manual re-check.
-    return []
+    # BUILT 2026-07-01: confirmed real Squarespace events page. Anchored on
+    # the most reliable pattern found all session: every event has a
+    # Google Calendar link embedding a precise UTC ISO timestamp
+    # (dates=20260701T160000Z/...) — using that directly sidesteps all the
+    # "Month D, Year" ambiguity/bugs from other scrapers tonight.
+    print('  Sky Tavern…', file=sys.stderr)
+    raw = get('https://www.skytavern.org/sky-tavern-calendar')
+    if not raw:
+        print('    no response', file=sys.stderr)
+        return []
+    events = []
+    seen = set()
+    no_date_found = 0
+    for m in re.finditer(r'/sky-tavern-calendar/([a-z0-9-]+)', raw, re.I):
+        slug = m.group(1)
+        if slug in seen: continue
+        seen.add(slug)
+        title_m = re.search(
+            rf'<a[^>]+href="[^"]*/sky-tavern-calendar/{re.escape(slug)}"[^>]*>([^<]{{2,120}})</a>',
+            raw, re.I)
+        if not title_m: continue
+        title = clean(title_m.group(1))
+        if not title: continue
+        after_text = raw[m.end():m.end()+600]
+        date_m = re.search(r'dates=(\d{8})T(\d{6})Z', after_text)
+        if not date_m:
+            no_date_found += 1
+            continue
+        date_part = date_m.group(1)  # YYYYMMDD
+        d = f'{date_part[0:4]}-{date_part[4:6]}-{date_part[6:8]}'
+        if not parse_date(d): continue
+        link = f'https://www.skytavern.org/sky-tavern-calendar/{slug}'
+        ev = make_ev(scrape_id('sky', slug), title,
+                     guess_cat(title, 'mountain bike'), d, 'reno',
+                     'Sky Tavern Bike Park', '21130 Mt Rose Hwy, Reno NV',
+                     None, None, False, f'{title} at Sky Tavern.',
+                     ['Sky Tavern', 'MTB', 'outdoor'], link, 'Sky Tavern')
+        if ev: events.append(ev)
+    print(f'    html_len={len(raw)}, unique_slugs={len(seen)}, no_date_found={no_date_found}',
+          file=sys.stderr)
+    print(f'    → {len(events)}', file=sys.stderr)
+    return events
 
 def scrape_live_lakeview():
-    # DISABLED 2026-07-01: liveatlakeview.com 404s on the Tribe API — site
-    # has moved off the plugin or restructured. Needs manual re-check.
+    # DISABLED 2026-07-01: confirmed this is a single recurring weekly
+    # series (Thursdays, June-Aug, rotating bands) at Lakeview Commons,
+    # not a multi-event calendar — and it already surfaces through the
+    # working Visit Lake Tahoe (Tribe) source via visitlaketahoe.com.
+    # Not a real coverage gap.
     return []
+
+def scrape_alibi():
+    # BUILT 2026-07-01: confirmed real, live events calendar covering TWO
+    # venues (Incline Village + Truckee) — recurring URL pattern
+    # /events/{slug}-YYYY-MM-DD/ and List/Grid/Calendar view toggle match
+    # The Events Calendar (Tribe) plugin exactly. Trying the proven Tribe
+    # REST API first, same as Holland Project/BBA/etc.
+    print('  Alibi Ale Works…', file=sys.stderr)
+    evts = scrape_tribe('https://alibialeworks.com', 'Alibi Ale Works',
+                        'tahoe', '', '',
+                        extra_tags=['Alibi', 'brewery', 'Truckee', 'Incline Village'],
+                        max_pages=10)
+    print(f'    → {len(evts)}', file=sys.stderr)
+    return evts
 
 def scrape_lateniteproductions():
     print('  Late Nite Productions…', file=sys.stderr)
@@ -892,11 +1008,96 @@ def scrape_ra():
 # ── EVENTBRITE (public search) ────────────────────────────────────────────────
 
 def scrape_eventbrite():
-    # DISABLED 2026-07-01: Eventbrite's public "destination search" endpoint
-    # returns 405 Method Not Allowed on every call — they've deprecated
-    # unauthenticated public search. Would need an official Eventbrite API
-    # key + their newer authenticated API to bring this back.
-    return []
+    # REBUILT 2026-07-01: the API is genuinely dead (405 on every call,
+    # confirmed), but I never actually checked their public listing pages
+    # until Matt pushed back on that — turns out they're real,
+    # server-rendered, and structured. Anchored on the confirmed
+    # /e/{slug}-tickets-{id} URL pattern. Dates are a mix of relative
+    # ("Today", "Tomorrow", "Friday") and absolute ("Wed, May 13") —
+    # resolved carefully below rather than guessed.
+    print('  Eventbrite…', file=sys.stderr)
+    events = []
+    seen = set()
+    no_date_found = 0
+    unresolved_relative = 0
+    urls = [
+        'https://www.eventbrite.com/d/nv--reno/events/',
+        'https://www.eventbrite.com/d/nv--reno/events--this-weekend/',
+    ]
+    WEEKDAYS = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
+    for url in urls:
+        raw = get(url)
+        if not raw: continue
+        for m in re.finditer(r'/e/([a-z0-9-]+-tickets-\d+)', raw, re.I):
+            event_slug = m.group(1)
+            if event_slug in seen: continue
+            seen.add(event_slug)
+            title_m = re.search(
+                rf'<a[^>]+href="[^"]*{re.escape(event_slug)}[^"]*"[^>]*>([^<]{{2,120}})</a>',
+                raw, re.I)
+            if not title_m: continue
+            title = clean(title_m.group(1))
+            if not title: continue
+            window = raw[m.end():m.end()+400]
+            d = None
+            # Try absolute date first: "Wed, May 13" style
+            abs_m = re.search(
+                r'(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s*'
+                r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+(\d{1,2})',
+                window)
+            if abs_m:
+                mon, day = abs_m.group(1), abs_m.group(2)
+                this_year = date.today().year
+                d = parse_date(f'{mon} {day}, {this_year}')
+                if d and d < TODAY:
+                    d = parse_date(f'{mon} {day}, {this_year + 1}')
+            else:
+                # Fall back to relative: Today / Tomorrow / a bare weekday name
+                if re.search(r'\bToday\b', window):
+                    d = TODAY
+                elif re.search(r'\bTomorrow\b', window):
+                    d = (date.today() + timedelta(days=1)).isoformat()
+                else:
+                    wd_m = re.search(r'\b(' + '|'.join(WEEKDAYS) + r')\b', window)
+                    if wd_m:
+                        target = WEEKDAYS.index(wd_m.group(1))
+                        today_wd = date.today().weekday()
+                        delta = (target - today_wd) % 7
+                        delta = delta or 7  # if it's literally today's weekday name, that means NEXT week's occurrence (today would say "Today" instead)
+                        d = (date.today() + timedelta(days=delta)).isoformat()
+                    else:
+                        unresolved_relative += 1
+            if not d:
+                no_date_found += 1
+                continue
+            # Venue name is plain text between tags, appearing after the
+            # date/time block. Tag-based (not newline-based — newlines in
+            # cleaned preview text aren't real in compressed raw HTML,
+            # which is exactly what broke the Cargo scraper earlier tonight).
+            venue_candidates = re.findall(r'>([A-Z][^<>]{2,60})<', window)
+            venue = 'Reno, NV'
+            skip_patterns = re.compile(
+                r'today|tomorrow|check ticket|save this event|share this event|'
+                r'\d{1,2}:\d{2}\s*(am|pm)|^\$|from \$|'
+                r'monday|tuesday|wednesday|thursday|friday|saturday|sunday',
+                re.I)
+            for cand in venue_candidates:
+                c = clean(cand)
+                if not c or c == title: continue
+                if skip_patterns.search(c): continue
+                venue = c
+                break
+            link = f'https://www.eventbrite.com/e/{event_slug}'
+            ev = make_ev(scrape_id('eb', event_slug), title,
+                         guess_cat(title), d, 'reno', venue, 'Reno, NV',
+                         None, None, False, f'{title} — via Eventbrite.',
+                         ['Eventbrite'], link, 'Eventbrite')
+            if ev: events.append(ev)
+        time.sleep(0.5)
+    print(f'    unique_events_found={len(seen)}, no_date_found={no_date_found}, '
+          f'unresolved_relative={unresolved_relative}', file=sys.stderr)
+    print(f'    → {len(events)}', file=sys.stderr)
+    return events
 
 # ── TICKETMASTER Discovery API ────────────────────────────────────────────────
 
@@ -1068,7 +1269,32 @@ def scrape_tm_venues():
     no_title_or_date = 0
     make_ev_rejected = 0
     venue_counts = []
-    for venue_id, venue_name, venue_addr, region in TM_VENUES:
+    id_resolutions = []
+    for hardcoded_id, venue_name, venue_addr, region in TM_VENUES:
+        # SAME FIX AS RENO ACES, applied 2026-07-01 after diagnostics showed
+        # 6 of 8 hardcoded venue IDs returning 0 events — almost certainly
+        # because those IDs were never actually verified. Rather than trust
+        # them, look up the real ID at runtime via TM's own venue search,
+        # falling back to the hardcoded ID only if the lookup itself fails.
+        venue_id = hardcoded_id
+        search_name = venue_name.split('–')[0].split('-')[0].strip()  # strip " – Grand Theatre" etc. suffixes
+        lookup_url = (f'https://app.ticketmaster.com/discovery/v2/venues.json'
+                      f'?apikey={api_key}&keyword={quote(search_name)}&stateCode=NV&size=3')
+        lookup_raw = get(lookup_url)
+        if lookup_raw and not lookup_raw.startswith('ERROR'):
+            try:
+                lookup_data = json.loads(lookup_raw)
+                found = (lookup_data.get('_embedded',{}).get('venues') or [])
+                if found:
+                    resolved_id = found[0].get('id')
+                    if resolved_id and resolved_id != hardcoded_id:
+                        id_resolutions.append(f'{venue_name}: hardcoded={hardcoded_id} -> resolved={resolved_id}')
+                        venue_id = resolved_id
+                    elif resolved_id:
+                        id_resolutions.append(f'{venue_name}: confirmed correct ({resolved_id})')
+            except: pass
+        if venue_id == hardcoded_id and not any(venue_name in r for r in id_resolutions):
+            id_resolutions.append(f'{venue_name}: lookup failed, using hardcoded {hardcoded_id}')
         before = len(events)
         page = 0
         while True:
@@ -1110,6 +1336,7 @@ def scrape_tm_venues():
             time.sleep(0.3)
         time.sleep(0.5)
         venue_counts.append(f'{venue_name}={len(events)-before}')
+    print(f'    id_resolution: {" | ".join(id_resolutions)}', file=sys.stderr)
     print(f'    per_venue: {", ".join(venue_counts)}', file=sys.stderr)
     print(f'    no_title_or_date={no_title_or_date}, make_ev_rejected={make_ev_rejected}',
           file=sys.stderr)
@@ -1377,6 +1604,7 @@ ALL_SCRAPERS = {
     'val':     scrape_valhalla,
     'sky':     scrape_skytavern,
     'lal':     scrape_live_lakeview,
+    'alibi':   scrape_alibi,
     'lnp':     scrape_lateniteproductions,
     'tixr':    scrape_tixr_playwright,
     'cargo':   scrape_cargo,
