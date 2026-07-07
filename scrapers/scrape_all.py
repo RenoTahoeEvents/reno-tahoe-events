@@ -1610,188 +1610,192 @@ def dedup(static_events, scraped_events):
     """
     Merge static + scraped with smart deduplication.
 
-    PRIORITY FIX 2026-07-04: the old rule was "static always wins,
-    unconditionally" — which is EXACTLY the mechanism that let a stale
-    manually-researched entry (wrong DJ name after a lineup change) sit
-    unfixed forever, since Dead Ringer was also hard-blocked from ever
-    receiving scraped updates via FULLY_COVERED_VENUES. Fixed rule:
-    static still wins by default (a human specifically researched it),
-    UNLESS the static entry is LOW-QUALITY (a generic placeholder like
-    "DJ Night" with no real name, OR its url is just a bare homepage
-    with no specific event page) and a scraped event for the same
-    venue+date has real, specific data — in that case the scraped data
-    supersedes the low-quality static placeholder instead of being
-    silently dropped forever.
+    REDESIGNED 2026-07-06 after a real production duplicate slipped through:
+    "Bally's Tahoe – DJ Night at HQ Center Bar" (static) and "DJ at HQ
+    Center Bar inside Bally's Lake Tahoe" (scraped) both showed up as
+    separate events on the live site. Root cause was two compounding
+    bugs: (1) the static entry's title contained the substring "DJ Night"
+    so it got misclassified as a low-quality placeholder even though it's
+    a complete, specific listing, which skipped the title-based dup
+    check; (2) the fallback venue-matching used exact string comparison,
+    which fails when the same venue name is worded in a different word
+    order ("HQ Center Bar Bally's Lake Tahoe" vs "Bally's Lake Tahoe –
+    HQ Center Bar").
 
-    SECOND FIX 2026-07-04: added a static-vs-static dedup pass. Found
-    via audit that two manually-researched entries can describe the
-    same real event under different titles (e.g. "Ritual – Reno Goth
-    Night (1st Sat)" vs "...(1st Saturday @ Dead Ringer)") and nothing
-    was ever checking for this. IMPORTANT: this MUST require the same
-    venue, not just date + title similarity — an early version of this
-    check without venue-matching produced dozens of false positives,
-    since many different real venues legitimately share the exact same
-    generic title ("DJ Night") on the same date without being duplicates
-    of each other at all.
+    Fix: identity is now primarily VENUE+DATE+TIME (word-order-
+    independent venue comparison), which is a far more reliable signal
+    that two listings describe the same real event than comparing title
+    text — two different sources will almost always phrase a title
+    differently even when it's the same show. Title similarity is kept
+    as an ADDITIONAL (not replacement) signal, so events that share a
+    title but are at genuinely different venues are still correctly
+    treated as different events (this is what prevented the false-
+    positive bug from an earlier version, where "LEX Nightclub – DJ
+    Night" and "EDGE Nightclub – DJ Night" were wrongly merged).
 
-    Scraped events are dropped if they match any NON-generic static
-    event by:
-      1. Exact ID match
-      2. Same date + normalized title similarity (prefix match or 80% word overlap)
-    Among scraped events themselves, same dedup logic applies.
+    When two entries are found to be the same real event, whichever is
+    HIGHER QUALITY survives: prefer a non-generic title, then a non-
+    bare-homepage URL, then the longer/more complete description.
+    This single "keep the better one" rule now applies uniformly to
+    static-vs-static, static-vs-scraped, AND scraped-vs-scraped —
+    the same logic, run three times, instead of three different
+    ad-hoc mechanisms.
     """
-    static_ids = {ev['id'] for ev in static_events}
+    from collections import defaultdict
     BARE_HOMEPAGE_RE = re.compile(r'^https?://[^/]+/?$')
+    STOPWORDS = {'the','at','in','on','inside','of','a','an','and'}
 
     def is_generic(title):
         t = (title or '').strip().lower()
         return any(re.search(p, t) for p in GENERIC_TITLE_PATTERNS)
 
     def is_low_quality(ev):
-        """A static entry is a candidate for superseding if its title is
-        generic OR its url is just a bare homepage (no specific event
-        page) — both are signs it was a placeholder, not verified detail."""
         return is_generic(ev['title']) or bool(BARE_HOMEPAGE_RE.match(ev.get('url') or ''))
 
-    def norm_venue(v):
-        return re.sub(r'[^a-z0-9]', '', (v or '').lower())
+    def venue_tokens(v):
+        """Word-order-independent venue signature. 'HQ Center Bar Bally's
+        Lake Tahoe' and 'Bally's Lake Tahoe – HQ Center Bar' produce the
+        IDENTICAL token set regardless of word order."""
+        words = re.findall(r'[a-z0-9]+', (v or '').lower())
+        return frozenset(w for w in words if w not in STOPWORDS and len(w) > 1)
 
-    # ── Static-vs-static dedup pass ──
-    # Only merges when BOTH venue AND date match AND titles are similar —
-    # all three required, or real distinct events (different venues that
-    # happen to share a generic title) get wrongly merged.
-    from collections import defaultdict
-    by_date_venue = defaultdict(list)
-    for ev in static_events:
-        by_date_venue[(ev['date'], norm_venue(ev.get('venue')))].append(ev)
+    def venues_match(t1, t2):
+        """True if these venue token sets refer to the same real venue —
+        exact match, or one is a near-complete subset of the other
+        (handles one source adding an extra word like 'Resort')."""
+        if not t1 or not t2: return False
+        if t1 == t2: return True
+        shorter, longer = (t1, t2) if len(t1) <= len(t2) else (t2, t1)
+        overlap = len(shorter & longer) / len(shorter)
+        return overlap >= 0.8
 
-    static_dupe_ids_to_drop = set()
-    for (d, v), evs in by_date_venue.items():
-        if len(evs) < 2 or not v: continue
-        for i in range(len(evs)):
-            if evs[i]['id'] in static_dupe_ids_to_drop: continue
-            for j in range(i+1, len(evs)):
-                if evs[j]['id'] in static_dupe_ids_to_drop: continue
-                if title_similarity(norm_title(evs[i]['title']), norm_title(evs[j]['title'])):
-                    # Keep whichever has the longer/more complete
-                    # description first (most reliable signal of more
-                    # thorough research) — a bare-homepage-vs-not check
-                    # was tried first but backfired: a Facebook group URL
-                    # like facebook.com/somegroup/ has a path segment that
-                    # looks "more specific" than a bare homepage, even
-                    # though it's just as generic in practice (not an
-                    # actual event page). Description length is more
-                    # reliable. Only fall back to URL-bareness as a
-                    # tiebreak when descriptions are near-identical length.
-                    a, b = evs[i], evs[j]
-                    len_a, len_b = len(a.get('desc','')), len(b.get('desc',''))
-                    if abs(len_a - len_b) > 15:
-                        static_dupe_ids_to_drop.add(a['id'] if len_a < len_b else b['id'])
-                    else:
-                        a_bare = bool(BARE_HOMEPAGE_RE.match(a.get('url') or ''))
-                        b_bare = bool(BARE_HOMEPAGE_RE.match(b.get('url') or ''))
-                        if a_bare and not b_bare:
-                            static_dupe_ids_to_drop.add(a['id'])
-                        elif b_bare and not a_bare:
-                            static_dupe_ids_to_drop.add(b['id'])
-                        else:
-                            static_dupe_ids_to_drop.add(a['id'] if len_a <= len_b else b['id'])
+    def times_compatible(t1, t2):
+        """None/missing time is treated as compatible with anything (we
+        often don't have a time for one source) — exact string match
+        otherwise. Not trying to parse/compare actual clock times here,
+        just checking sources don't outright disagree."""
+        if not t1 or not t2: return True
+        return t1.strip().lower() == t2.strip().lower()
 
-    if static_dupe_ids_to_drop:
-        print(f'    [dedup] {len(static_dupe_ids_to_drop)} static-vs-static '
-              f'duplicate(s) found (same venue+date+similar title) — kept '
-              f'the more complete entry for each', file=sys.stderr)
-    static_events = [ev for ev in static_events if ev['id'] not in static_dupe_ids_to_drop]
+    def same_real_event(ev1, ev2):
+        """THE core identity check. CRITICAL SAFETY FIX 2026-07-06: found
+        via real-data testing that matching on venue+date+time ALONE is
+        dangerous when a venue hosts different real, distinct acts on
+        the same generic time slot — e.g. "RJD2" and "Kitchen Dwellers"
+        both at Crystal Bay Casino's 8:00 PM slot on the same date are
+        two completely different bands, not duplicates. Fix: only skip
+        the title check when at least ONE side is a generic placeholder
+        (safe — that's the intentional "supersede a placeholder" case).
+        If BOTH titles are specific/named, they must ALSO pass title
+        similarity — this is what correctly keeps RJD2 and Kitchen
+        Dwellers as separate while still merging genuine duplicates
+        like the two differently-worded "Ritual" goth night entries."""
+        if ev1['date'] != ev2['date']: return False
+        v1, v2 = venue_tokens(ev1.get('venue')), venue_tokens(ev2.get('venue'))
+        if not venues_match(v1, v2): return False
+        ev1_generic, ev2_generic = is_generic(ev1['title']), is_generic(ev2['title'])
+        if ev1_generic or ev2_generic:
+            return times_compatible(ev1.get('time'), ev2.get('time'))
+        return title_similarity(norm_title(ev1['title']), norm_title(ev2['title']))
+
+    def quality_key(ev):
+        """Higher is better. Used to decide which of two same-real-event
+        entries survives. FIXED 2026-07-06: description length must be
+        checked FIRST, not title-genericity or URL-bareness — testing
+        against real data showed both of those backfire: (1) a title
+        can contain a generic phrase like "DJ Night" while still being a
+        complete, well-researched listing, so genericity alone isn't a
+        reliable disqualifier; (2) a Facebook group URL has a path
+        segment that looks "more specific" than a bare homepage even
+        though it's just as generic in practice (not an actual event
+        page) — and an EMPTY url string doesn't match the bare-homepage
+        regex at all, so it was wrongly treated as "not bare" (good)
+        instead of the worst case. Bucketing description length (rather
+        than comparing exact lengths) avoids trivial 1-2 character
+        differences deciding the outcome."""
+        desc_bucket = len(ev.get('desc') or '') // 20
+        url = ev.get('url') or ''
+        has_real_url = 1 if (url and not BARE_HOMEPAGE_RE.match(url)) else 0
+        non_generic = 0 if is_generic(ev['title']) else 1
+        return (desc_bucket, has_real_url, non_generic)
+
+    def dedup_within(events_list, label):
+        """Generic same-list dedup: groups by date, compares all pairs
+        within each date for same_real_event, keeps the highest-quality
+        entry from each duplicate cluster. Used for static-vs-static and
+        scraped-vs-scraped; static-vs-scraped uses a variant below since
+        it also needs to track which static entries got superseded."""
+        by_date = defaultdict(list)
+        for ev in events_list:
+            by_date[ev['date']].append(ev)
+        drop_ids = set()
+        for date, evs in by_date.items():
+            for i in range(len(evs)):
+                if evs[i]['id'] in drop_ids: continue
+                for j in range(i+1, len(evs)):
+                    if evs[j]['id'] in drop_ids: continue
+                    if same_real_event(evs[i], evs[j]):
+                        loser = evs[i] if quality_key(evs[i]) < quality_key(evs[j]) else evs[j]
+                        drop_ids.add(loser['id'])
+        if drop_ids:
+            print(f'    [dedup] {len(drop_ids)} {label} duplicate(s) found '
+                  f'(same venue+date+time) — kept the better entry for each',
+                  file=sys.stderr)
+        return [ev for ev in events_list if ev['id'] not in drop_ids]
+
+    # ── Pass 1: static-vs-static ──
+    static_events = dedup_within(static_events, 'static-vs-static')
     static_ids = {ev['id'] for ev in static_events}
-
-    # Build index of static (norm_title, date, is_low_quality, norm_venue)
-    static_index = []
-    for ev in static_events:
-        static_index.append((norm_title(ev['title']), ev['date'],
-                             is_low_quality(ev), norm_venue(ev.get('venue'))))
-
-    def matches_static(ev):
-        """Returns 'block' if this scraped event duplicates a real
-        (non-low-quality) static event by title+date, 'supersede' if it
-        shares venue+date with a LOW-QUALITY static placeholder (generic
-        title or bare-homepage url — title-similarity can't be the match
-        key for these since a placeholder's title/url never mentions the
-        real specifics), or None if no match."""
-        nt = norm_title(ev['title'])
-        d  = ev['date']
-        nv = norm_venue(ev.get('venue'))
-        matched_generic = False
-        for s_nt, s_d, s_low_quality, s_nv in static_index:
-            if s_d != d: continue
-            if not s_low_quality and title_similarity(nt, s_nt):
-                return 'block'
-            if s_low_quality and nv and s_nv and nv == s_nv:
-                matched_generic = True
-        return 'supersede' if matched_generic else None
 
     # Venues where we deliberately keep ONLY the static entries (no
     # automated scraper exists or should exist for these — e.g. one-off
-    # community park series). Dead Ringer was REMOVED from this list
-    # 2026-07-04 — it has generic placeholders that need to be
-    # supersedable by real scraped data, not permanently walled off.
-    static_venue_dates = set()
+    # community park series).
     FULLY_COVERED_VENUES = {
         'greater nevada field', 'sky tavern bike park',
         'idlewild park', 'west street plaza', 'wingfield park',
     }
+    static_venue_dates = set()
     for ev in static_events:
         v = (ev.get('venue') or '').lower()
         if any(fv in v for fv in FULLY_COVERED_VENUES):
             static_venue_dates.add((v[:30], ev['date']))
 
-    # Track which static events get superseded so we can remove them
-    # from the final output instead of ending up with both a generic
-    # placeholder AND the real scraped event side by side
+    # ── Pass 2: scraped-vs-static ──
     superseded_static_keys = set()
-
-    # Filter scraped against static
     unique_scraped = []
-    seen_scraped   = []  # list of (norm_title, date) already added from scraped
+    accepted_scraped = []  # running list, for pass 3 (scraped-vs-scraped)
 
     for ev in scraped_events:
         if ev['id'] in static_ids: continue
-        match_result = matches_static(ev)
-        if match_result == 'block': continue
-        # Skip if we have full static coverage of this venue on this date
         v = (ev.get('venue') or '').lower()
-        v_norm = norm_venue(v)
         if any(fv in v for fv in FULLY_COVERED_VENUES):
             if (v[:30], ev['date']) in static_venue_dates: continue
 
-        nt = norm_title(ev['title'])
-        d  = ev['date']
-
-        # Check against already-accepted scraped events
-        is_dup = False
-        for s_nt, s_d in seen_scraped:
-            if s_d == d and title_similarity(nt, s_nt):
-                is_dup = True
+        # Does this scraped event describe the same real event as any
+        # static one? If so, keep whichever is higher quality.
+        dup_static = None
+        for s_ev in static_events:
+            if s_ev['id'] in superseded_static_keys: continue
+            if same_real_event(ev, s_ev):
+                dup_static = s_ev
                 break
-        if is_dup: continue
+        if dup_static:
+            if quality_key(ev) > quality_key(dup_static):
+                superseded_static_keys.add(dup_static['id'])
+            else:
+                continue  # static wins, drop this scraped event
 
-        if match_result == 'supersede':
-            # Mark the matching low-quality static event(s) for removal —
-            # matched on venue+date (a placeholder's title/url never
-            # mentions the real specifics by design)
-            for s_ev in static_events:
-                if s_ev['date'] == d and is_low_quality(s_ev) and \
-                   norm_venue(s_ev.get('venue')) == v_norm:
-                    superseded_static_keys.add(s_ev['id'])
-
-        seen_scraped.append((nt, d))
         unique_scraped.append(ev)
 
-    kept_static = [ev for ev in static_events if ev['id'] not in superseded_static_keys]
     if superseded_static_keys:
-        print(f'    [dedup] {len(superseded_static_keys)} generic static placeholder(s) '
-              f'superseded by real scraped data', file=sys.stderr)
+        print(f'    [dedup] {len(superseded_static_keys)} lower-quality static '
+              f'placeholder(s) superseded by real scraped data', file=sys.stderr)
+    static_events = [ev for ev in static_events if ev['id'] not in superseded_static_keys]
 
-    merged = kept_static + unique_scraped
+    # ── Pass 3: scraped-vs-scraped ──
+    unique_scraped = dedup_within(unique_scraped, 'scraped-vs-scraped')
+
+    merged = static_events + unique_scraped
     merged.sort(key=lambda e: e['date'])
     return merged, len(unique_scraped)
 
